@@ -25,6 +25,18 @@ DERIVED_NODE_TYPES = frozenset({
     "Principle", "Belief", "Value", "Rule", "Pattern", "Domain", "FeedbackProfile", "Proposal",
 })
 
+
+def _secure_sqlite_state(path: Path) -> None:
+    """Tighten the database and every extant SQLite private-state sidecar."""
+    for candidate in (
+        path,
+        Path(str(path) + "-wal"),
+        Path(str(path) + "-shm"),
+        Path(str(path) + "-journal"),
+    ):
+        if candidate.exists():
+            secure_file(candidate)
+
 def version_provenance(*, status: str, authority_tier: str, actor_class: str,
                        actor_id: str, mechanism: str, event_id: str,
                        model: str | None = None, prompt_recipe: str | None = None,
@@ -68,6 +80,7 @@ class ImprintStore:
                 def new_store_connection():
                     conn = sqlite3.connect(self.path, timeout=30)
                     try:
+                        _secure_sqlite_state(self.path)
                         yield conn
                         conn.commit()
                     except Exception:
@@ -75,6 +88,7 @@ class ImprintStore:
                         raise
                     finally:
                         conn.close()
+                        _secure_sqlite_state(self.path)
                 context = new_store_connection()
             with context as conn:
                 conn.executescript(SCHEMA_SQL)
@@ -86,7 +100,7 @@ class ImprintStore:
                     "INSERT OR IGNORE INTO meta(key,value) VALUES('ontology_schema_version',?)",
                     (ONTOLOGY_SCHEMA_VERSION,),
                 )
-            secure_file(self.path)
+            _secure_sqlite_state(self.path)
             self._compatibility_verified = True
         except Exception:
             self._compatibility_verified = False
@@ -173,6 +187,7 @@ class ImprintStore:
             conn = sqlite3.connect(
                 f"{resolved.as_uri()}?mode=rw", uri=True, timeout=30,
             )
+            _secure_sqlite_state(resolved)
         except (OSError, sqlite3.DatabaseError) as exc:
             raise ValidationError("store changed before connection") from exc
         handle_validated = False
@@ -197,15 +212,14 @@ class ImprintStore:
             if not handle_validated:
                 for sidecar in (
                     Path(str(resolved) + "-wal"), Path(str(resolved) + "-shm"),
+                    Path(str(resolved) + "-journal"),
                 ):
                     sidecar.unlink(missing_ok=True)
             if self.path.exists():
-                try:
-                    current = self.path.resolve(strict=True).stat(follow_symlinks=False)
-                    if identity == (current.st_dev, current.st_ino):
-                        secure_file(self.path)
-                except OSError:
-                    pass
+                current_path = self.path.resolve(strict=True)
+                current = current_path.stat(follow_symlinks=False)
+                if identity == (current.st_dev, current.st_ino):
+                    _secure_sqlite_state(current_path)
 
     @contextmanager
     def _migration_connection(
@@ -226,6 +240,7 @@ class ImprintStore:
         conn = sqlite3.connect(f"{resolved.as_uri()}?mode=rw", uri=True, timeout=30)
         handle_validated = False
         try:
+            _secure_sqlite_state(resolved)
             self._require_connection_compatible(
                 conn, store_versions=store_versions,
                 ontology_versions=ontology_versions,
@@ -247,8 +262,13 @@ class ImprintStore:
         finally:
             conn.close()
             if not handle_validated:
-                for suffix in ("-wal", "-shm"):
+                for suffix in ("-wal", "-shm", "-journal"):
                     Path(str(resolved) + suffix).unlink(missing_ok=True)
+            if self.path.exists():
+                current_path = self.path.resolve(strict=True)
+                current = current_path.stat(follow_symlinks=False)
+                if identity == (current.st_dev, current.st_ino):
+                    _secure_sqlite_state(current_path)
 
     def integrity_check(self) -> str:
         with self.connect() as conn:

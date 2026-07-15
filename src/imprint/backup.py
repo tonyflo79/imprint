@@ -39,14 +39,44 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _sidecars(path: Path) -> tuple[Path, Path]:
-    return Path(str(path) + "-wal"), Path(str(path) + "-shm")
+def _sidecars(path: Path) -> tuple[Path, Path, Path]:
+    return (
+        Path(str(path) + "-wal"),
+        Path(str(path) + "-shm"),
+        Path(str(path) + "-journal"),
+    )
+
+
+def _secure_sqlite_state(path: Path) -> None:
+    """Tighten an SQLite file and any private-state sidecars that exist."""
+    for candidate in (path, *_sidecars(path)):
+        if candidate.exists():
+            secure_file(candidate)
+
+
+def _write_atomic_private(path: Path, payload: str) -> None:
+    """Publish UTF-8 text from a pre-secured same-directory temporary file."""
+    if path.exists() or path.is_symlink():
+        raise SafetyError("refusing to overwrite an existing backup receipt")
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent,
+    )
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        secure_file(temporary)
+        temporary.write_text(payload, encoding="utf-8")
+        secure_file(temporary)
+        os.replace(temporary, path)
+        secure_file(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _inspect_database(path: Path) -> dict[str, str]:
     """Validate a closed standalone database without creating sidecars."""
     if any(sidecar.exists() for sidecar in _sidecars(path)):
-        raise ValidationError("database has WAL/SHM sidecars and is not a closed backup")
+        raise ValidationError("database has WAL/SHM/journal sidecars and is not a closed backup")
     try:
         resolved = path.resolve(strict=True)
         if path.is_symlink() or not resolved.is_file():
@@ -124,14 +154,20 @@ def create_backup(store: ImprintStore, root: Path, output: Path | None = None) -
     os.close(fd)
     temporary = Path(temporary_name)
     try:
+        secure_file(temporary)
         source = sqlite3.connect(store.path)
         destination = sqlite3.connect(temporary)
         try:
+            _secure_sqlite_state(store.path)
+            _secure_sqlite_state(temporary)
             source.backup(destination)
         finally:
             destination.close()
             source.close()
+            _secure_sqlite_state(store.path)
+            _secure_sqlite_state(temporary)
         inspected = _inspect_database(temporary)
+        secure_file(temporary)
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
@@ -145,8 +181,7 @@ def create_backup(store: ImprintStore, root: Path, output: Path | None = None) -
         "integrity": inspected["integrity"],
     }
     receipt_path = target.with_suffix(target.suffix + ".receipt.json")
-    receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
-    secure_file(receipt_path)
+    _write_atomic_private(receipt_path, json.dumps(receipt, sort_keys=True) + "\n")
     return {**receipt, "path": str(target), "receipt_path": str(receipt_path)}
 
 
@@ -197,7 +232,9 @@ def restore_backup(store: ImprintStore, root: Path, source: Path, *, confirmatio
     live_existed = store.path.exists()
     safety = None
     try:
+        secure_file(temporary)
         shutil.copyfile(source, temporary)
+        secure_file(temporary)
         _inspect_database(temporary)
         _require_staged_identity(temporary, verified)
         if live_existed and any(sidecar.exists() for sidecar in _sidecars(store.path)):
@@ -209,6 +246,7 @@ def restore_backup(store: ImprintStore, root: Path, source: Path, *, confirmatio
                 os.link(store.path, rollback)
             except OSError:
                 shutil.copyfile(store.path, rollback)
+            secure_file(rollback)
         # Recheck immediately before replacement so neither source substitution
         # nor staged-file replacement can cross the verified restore boundary.
         _require_staged_identity(temporary, verified)
@@ -219,6 +257,7 @@ def restore_backup(store: ImprintStore, root: Path, source: Path, *, confirmatio
         except Exception:
             if rollback is not None:
                 os.replace(rollback, store.path)
+                secure_file(store.path)
             else:
                 store.path.unlink(missing_ok=True)
             raise
