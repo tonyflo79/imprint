@@ -154,21 +154,17 @@ def _truncate_utf8(value: str, byte_limit: int) -> tuple[str, bool]:
     return encoded[:byte_limit].decode("utf-8", errors="ignore"), True
 
 
-def _parse_large_native_transcript(path_value: str) -> dict:
+def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
     """Recover final feedback from a huge transcript using a bounded tail read."""
+    from .capture.transcript import _read_native_transcript_snapshot
     from .errors import ValidationError
 
-    path = Path(path_value).expanduser()
-    if not path.is_absolute() or path.is_symlink() or not path.is_file():
-        raise ValidationError("transcript_path must be an absolute regular non-symlink file")
-    size = path.stat().st_size
-    if size <= 0:
-        raise ValidationError("transcript_path is empty")
     tail_limit = 2 * 1024 * 1024
-    with path.open("rb") as handle:
-        offset = max(0, size - tail_limit)
-        handle.seek(offset)
-        tail = handle.read(tail_limit)
+    if snapshot is None:
+        snapshot = _read_native_transcript_snapshot(path_value, tail_limit=tail_limit)
+    size = snapshot.size
+    offset = snapshot.offset
+    tail = snapshot.data
     if offset:
         newline = tail.find(b"\n")
         tail = tail[newline + 1:] if newline >= 0 else b""
@@ -903,7 +899,12 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.action == "stop-capture":
                 _validate_hook_event(event, "Stop")
-                from .capture import build_capture_envelope, parse_native_stop_transcript
+                from .capture import build_capture_envelope
+                from .capture.transcript import (
+                    MAX_TRANSCRIPT_BYTES,
+                    _parse_native_stop_snapshot,
+                    _read_native_transcript_snapshot,
+                )
                 from .capture.detector import detect_explicit_feedback
                 operator_text = event.get("operator_text") or event.get("last_user_message")
                 prior_assistant = event.get("prior_assistant_output")
@@ -911,12 +912,16 @@ def main(argv: list[str] | None = None) -> int:
                 contextual_evidence = []
                 extensions = {}
                 if not operator_text and isinstance(event.get("transcript_path"), str):
-                    transcript = Path(event["transcript_path"]).expanduser()
-                    if transcript.is_file() and transcript.stat().st_size > 16 * 1024 * 1024:
-                        native = _parse_large_native_transcript(event["transcript_path"])
+                    snapshot = _read_native_transcript_snapshot(
+                        event["transcript_path"], tail_limit=2 * 1024 * 1024,
+                    )
+                    if snapshot.size > MAX_TRANSCRIPT_BYTES:
+                        native = _parse_large_native_transcript(
+                            event["transcript_path"], snapshot=snapshot,
+                        )
                         extensions["org.imprint.transcript"] = native["degradation"]
                     else:
-                        native = parse_native_stop_transcript(event["transcript_path"])
+                        native = _parse_native_stop_snapshot(snapshot)
                     operator_text = native["operator_text"]
                     prior_assistant = native["prior_assistant_output"]
                     case_description = native["case_description"]

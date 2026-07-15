@@ -10,10 +10,29 @@ $Settings = Join-Path $env:USERPROFILE ".claude\settings.json"
 $Data = Join-Path $env:LOCALAPPDATA "Imprint Data"
     $Launcher = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\imprint.cmd"
     New-Item -ItemType Directory -Force -Path $env:USERPROFILE | Out-Null
+function Get-AclSignature([string]$Path) {
+    $Acl = Get-Acl -LiteralPath $Path
+    $Rules = @($Acl.Access | ForEach-Object {
+        [ordered]@{
+            Identity = $_.IdentityReference.Value
+            Rights = [string]$_.FileSystemRights
+            Type = [string]$_.AccessControlType
+            Inherited = $_.IsInherited
+            Inheritance = [string]$_.InheritanceFlags
+            Propagation = [string]$_.PropagationFlags
+        }
+    } | Sort-Object Identity, Rights, Type, Inherited, Inheritance, Propagation)
+    return ([ordered]@{
+        Owner = $Acl.Owner
+        Group = $Acl.Group
+        Protected = $Acl.AreAccessRulesProtected
+        Rules = $Rules
+    } | ConvertTo-Json -Compress -Depth 6)
+}
 try {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config), $Data | Out-Null
-    $ConfigAclBefore = (Get-Acl (Split-Path -Parent $Config)).Sddl
-    $DataAclBefore = (Get-Acl $Data).Sddl
+    $ConfigAclBefore = Get-AclSignature (Split-Path -Parent $Config)
+    $DataAclBefore = Get-AclSignature $Data
     $Unowned = Join-Path $env:LOCALAPPDATA "Unowned App"
     New-Item -ItemType Directory -Force -Path $Unowned | Out-Null
     Set-Content (Join-Path $Unowned "sentinel.txt") "must-survive"
@@ -29,7 +48,11 @@ try {
     Remove-Item $Wheel.FullName -Force
     Move-Item $ValidWheel $Wheel.FullName
     if (-not $failed -or (Test-Path (Join-Path $InstallRoot ".imprint-install-root"))) { throw "Failed install left an ownership marker." }
-    if ((Get-Acl (Split-Path -Parent $Config)).Sddl -ne $ConfigAclBefore -or (Get-Acl $Data).Sddl -ne $DataAclBefore) { throw "Failed install did not restore external ACLs." }
+    $ConfigAclAfter = Get-AclSignature (Split-Path -Parent $Config)
+    $DataAclAfter = Get-AclSignature $Data
+    if ($ConfigAclAfter -ne $ConfigAclBefore -or $DataAclAfter -ne $DataAclBefore) {
+        throw "Failed install did not restore effective external ACLs. Config before=$ConfigAclBefore after=$ConfigAclAfter Data before=$DataAclBefore after=$DataAclAfter"
+    }
     New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
     Set-Content -Encoding ascii (Join-Path $InstallRoot "legacy-owned.txt") "legacy"
     & python (Join-Path $ArtifactRoot "tools\install\install_ownership.py") record --root $InstallRoot

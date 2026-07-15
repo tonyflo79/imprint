@@ -18,8 +18,15 @@ mkdir -p "${HOME}"
 mkdir -p "$(dirname "${CONFIG}")" "${DATA}"
 chmod 751 "$(dirname "${CONFIG}")"
 chmod 750 "${DATA}"
-config_parent_mode_before="$(stat -f '%Lp' "$(dirname "${CONFIG}")" 2>/dev/null || stat -c '%a' "$(dirname "${CONFIG}")")"
-data_mode_before="$(stat -f '%Lp' "${DATA}" 2>/dev/null || stat -c '%a' "${DATA}")"
+mode_of() {
+  if stat -f '%Lp' "$1" >/dev/null 2>&1; then
+    stat -f '%Lp' "$1"
+  else
+    stat -c '%a' "$1"
+  fi
+}
+config_parent_mode_before="$(mode_of "$(dirname "${CONFIG}")")"
+data_mode_before="$(mode_of "${DATA}")"
 
 UNOWNED="${HOME}/Applications/Unowned App"
 mkdir -p "${UNOWNED}"
@@ -38,8 +45,8 @@ if bash "${ARTIFACT_ROOT}/install/install.sh" --install-root "${INSTALL_ROOT}" -
   exit 1
 fi
 test ! -e "${INSTALL_ROOT}/.imprint-install-root"
-test "$(stat -f '%Lp' "$(dirname "${CONFIG}")" 2>/dev/null || stat -c '%a' "$(dirname "${CONFIG}")")" = "${config_parent_mode_before}"
-test "$(stat -f '%Lp' "${DATA}" 2>/dev/null || stat -c '%a' "${DATA}")" = "${data_mode_before}"
+test "$(mode_of "$(dirname "${CONFIG}")")" = "${config_parent_mode_before}"
+test "$(mode_of "${DATA}")" = "${data_mode_before}"
 rm -f "${WHEEL}"
 mv "${WHEEL}.valid" "${WHEEL}"
 
