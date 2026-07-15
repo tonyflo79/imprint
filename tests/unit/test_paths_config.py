@@ -35,3 +35,20 @@ def test_higher_context_budget_requires_explicit_bounded_opt_in(tmp_path):
     config.write_text('{"context_budget_bytes":131073,"allow_higher_budget":true}')
     with pytest.raises(ValidationError, match="4096..131072"):
         load_config(config)
+
+
+def test_unknown_bare_config_key_is_rejected_but_namespaced_is_kept(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text('{"spool_retention_dayz":7}')
+    with pytest.raises(ValidationError, match="unknown config keys"):
+        load_config(config)
+    config.write_text('{"org.example.ext":{"anything":true}}')
+    loaded = load_config(config)
+    assert loaded["org.example.ext"] == {"anything": True}
+
+
+def test_unsupported_config_version_is_rejected(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text('{"config_version":"2.0.0"}')
+    with pytest.raises(ValidationError, match="config_version"):
+        load_config(config)
