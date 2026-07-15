@@ -19,6 +19,7 @@ from imprint.errors import ValidationError
 from imprint.ingest import IngestCandidate, IngestService
 from imprint.portability import export_jsonld, import_jsonld
 from imprint.portability.migrations import Migration, MigrationRunner
+from imprint.permissions import unsafe_private_permissions
 from imprint.projections import jsonld_document
 from imprint.purge import hard_purge, preview_purge
 from imprint.retrieve import RetrievalEngine, StoreRetrievalSource
@@ -211,7 +212,7 @@ def main() -> int:
     )
     assert purge["status"] == "purged", purge
     assert store.current_nodes() == []
-    assert_healthy_private_state()
+    assert unsafe_private_permissions(operator_root) == ()
     sentinel = operator_root / "acceptance-data-sentinel.txt"
     sentinel.write_text("preserve-me\n", encoding="utf-8")
     print(json.dumps({"status": "ok", "sentinel": str(sentinel)}, sort_keys=True))
