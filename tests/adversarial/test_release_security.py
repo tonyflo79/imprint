@@ -81,5 +81,9 @@ def test_ownership_manifest_refuses_unknown_or_mutated_files(tmp_path: Path) -> 
 def test_windows_uninstaller_stages_cleanup_outside_owned_venv() -> None:
     script = (ROOT / "install" / "uninstall.ps1").read_text(encoding="utf-8")
     assert "sys._base_executable" in script
-    assert "& $BasePython $StagedOwnership uninstall --root $InstallRoot" in script
+    assert "cleanup interpreter is inside the owned install root" in script
+    external_verify = script.index("& $BasePython -I -S $StagedOwnership verify --root $InstallRoot")
+    unregister = script.index("$Manager unregister")
+    uninstall = script.index("& $BasePython -I -S $StagedOwnership uninstall --root $InstallRoot")
+    assert external_verify < unregister < uninstall
     assert "& $Python $Ownership uninstall --root $InstallRoot" not in script
