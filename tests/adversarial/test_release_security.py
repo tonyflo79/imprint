@@ -87,3 +87,14 @@ def test_windows_uninstaller_stages_cleanup_outside_owned_venv() -> None:
     uninstall = script.index("& $BasePython -I -S $StagedOwnership uninstall --root $InstallRoot")
     assert external_verify < unregister < uninstall
     assert "& $Python $Ownership uninstall --root $InstallRoot" not in script
+
+
+def test_release_provenance_covers_every_shipped_and_build_input() -> None:
+    package = load("package_for_provenance_test", "tools/release/package.py")
+    allowlist = package.load_allowlist()
+    relative = {path.relative_to(ROOT).as_posix() for path in package.release_inputs(allowlist)}
+    assert set(allowlist) <= relative
+    assert {"pyproject.toml", "tools/release/package.py"} <= relative
+    assert {path.relative_to(ROOT).as_posix() for path in (ROOT / "src").rglob("*.py")} <= relative
+    script = (ROOT / "tools" / "release" / "package.py").read_text(encoding="utf-8")
+    assert "refusing a release build from a dirty worktree" in script

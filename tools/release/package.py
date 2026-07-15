@@ -64,20 +64,42 @@ def load_allowlist() -> list[str]:
     return values
 
 
-def source_digest() -> str:
+def release_inputs(allowlist: list[str]) -> list[Path]:
+    candidates = {
+        ROOT / "pyproject.toml",
+        ROOT / "tools" / "release" / "package.py",
+        *(ROOT / item for item in allowlist),
+        *sorted((ROOT / "src").rglob("*.py")),
+    }
+    missing = [path for path in candidates if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"missing release build input: {missing[0]}")
+    return sorted(candidates, key=lambda path: path.relative_to(ROOT).as_posix())
+
+
+def source_digest(allowlist: list[str]) -> str:
     digest = hashlib.sha256()
-    candidates = [ROOT / "pyproject.toml", *sorted((ROOT / "src").rglob("*.py"))]
-    for path in candidates:
+    for path in release_inputs(allowlist):
         relative = path.relative_to(ROOT).as_posix().encode()
         digest.update(relative + b"\0" + path.read_bytes() + b"\0")
     return digest.hexdigest()
 
 
 def source_revision() -> str:
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    if status.returncode != 0:
+        raise RuntimeError("unable to verify clean release worktree")
+    if status.stdout.strip():
+        raise RuntimeError("refusing a release build from a dirty worktree")
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=False
     )
-    return result.stdout.strip() if result.returncode == 0 else "UNCOMMITTED"
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError("unable to resolve the release source revision")
+    return result.stdout.strip()
 
 
 def build_python_dist() -> None:
@@ -121,7 +143,7 @@ def normalize_sdist(path: Path) -> None:
     os.replace(temporary, path)
 
 
-def write_supply_chain_metadata() -> None:
+def write_supply_chain_metadata(source_tree_sha256: str, revision: str) -> None:
     release_dir = STAGE / "release"
     release_dir.mkdir(parents=True, exist_ok=True)
     distributions = [
@@ -152,8 +174,8 @@ def write_supply_chain_metadata() -> None:
         "product": "imprint-local",
         "version": VERSION,
         "source_date_epoch": SOURCE_DATE_EPOCH,
-        "source_tree_sha256": source_digest(),
-        "source_revision": source_revision(),
+        "source_tree_sha256": source_tree_sha256,
+        "source_revision": revision,
         "builder": "tools/release/package.py",
         "build_backend": "setuptools==80.9.0",
         "frontend": "build==1.3.0",
@@ -217,10 +239,11 @@ def build_tar(path: Path) -> None:
 
 def main() -> int:
     allowlist = load_allowlist()
-    initial_source_digest = source_digest()
+    revision = source_revision()
+    initial_source_digest = source_digest(allowlist)
     guarded_reset(OUTPUT, "release-artifacts")
     build_python_dist()
-    if source_digest() != initial_source_digest:
+    if source_digest(allowlist) != initial_source_digest or source_revision() != revision:
         raise RuntimeError("source tree changed during release build; retry from a stable revision")
     STAGE.mkdir()
     for item in allowlist:
@@ -228,7 +251,7 @@ def main() -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
     shutil.copytree(DIST, STAGE / "dist")
-    write_supply_chain_metadata()
+    write_supply_chain_metadata(initial_source_digest, revision)
     validate_stage(allowlist)
     archive_zip = OUTPUT / f"imprint-{VERSION}.zip"
     archive_tar = OUTPUT / f"imprint-{VERSION}.tar.gz"
