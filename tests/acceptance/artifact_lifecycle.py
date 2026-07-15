@@ -109,12 +109,12 @@ def main() -> int:
         env=installed_env, check=False,
     )
     if health.returncode != 0 and os.name == "nt":
-        permission_probe = run([
-            python, "-c",
+        permission_probe = subprocess.run([
+            sys.executable, "-c",
             "from pathlib import Path; from imprint.permissions import unsafe_windows_permissions; "
             "import sys; print(unsafe_windows_permissions(Path(sys.argv[1])))",
             str(operator_root),
-        ], env)
+        ], text=True, capture_output=True, env=installed_env, check=False)
         raise AssertionError(
             health.stdout + health.stderr + "\npermission_probe="
             + permission_probe.stdout + permission_probe.stderr
