@@ -72,9 +72,9 @@ jobs:
           path: candidate
       - run: python tools/release/verify_artifacts.py candidate
       - name: Extract tar artifact
-        run: python tools/release/extract_safe.py candidate/imprint-3.0.0.tar.gz extracted
+        run: python tools/release/extract_safe.py candidate/imprint-3.0.1.tar.gz extracted
       - name: Empty-HOME artifact acceptance
-        run: bash extracted/imprint-3.0.0/tests/acceptance/test_install_posix.sh
+        run: bash extracted/imprint-3.0.1/tests/acceptance/test_install_posix.sh
 
   artifact-windows:
     needs: build
@@ -91,7 +91,7 @@ jobs:
       - run: python tools/release/verify_artifacts.py candidate
       - name: Extract ZIP artifact
         shell: pwsh
-        run: python tools/release/extract_safe.py candidate/imprint-3.0.0.zip extracted
+        run: python tools/release/extract_safe.py candidate/imprint-3.0.1.zip extracted
       - name: Genuine Windows empty-profile acceptance
         shell: pwsh
-        run: ./extracted/imprint-3.0.0/tests/acceptance/test_install_windows.ps1
+        run: ./extracted/imprint-3.0.1/tests/acceptance/test_install_windows.ps1

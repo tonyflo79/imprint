@@ -78,6 +78,24 @@ def test_ownership_manifest_refuses_unknown_or_mutated_files(tmp_path: Path) -> 
         ownership.verify(root)
 
 
+def test_ownership_manifest_ignores_and_removes_runtime_bytecode(tmp_path: Path) -> None:
+    ownership = load("install_ownership_for_runtime_cache", "tools/install/install_ownership.py")
+    root = tmp_path / "install"
+    cache = root / "hooks" / "__pycache__"
+    cache.mkdir(parents=True)
+    (root / "hooks" / "bridge.py").write_text("pass\n", encoding="utf-8")
+    bytecode = cache / "bridge.cpython-314.pyc"
+    bytecode.write_bytes(b"before")
+    ownership.record(root)
+    (root / ownership.MARKER).write_text("imprint-local:3.0.1\n", encoding="ascii")
+
+    entries = json.loads((root / ownership.MANIFEST).read_text(encoding="utf-8"))["entries"]
+    assert not any("__pycache__" in entry["path"] for entry in entries)
+    bytecode.write_bytes(b"after ordinary hook execution")
+    ownership.uninstall(root)
+    assert not root.exists()
+
+
 def test_windows_uninstaller_stages_cleanup_outside_owned_venv() -> None:
     script = (ROOT / "install" / "uninstall.ps1").read_text(encoding="utf-8")
     assert "sys._base_executable" in script

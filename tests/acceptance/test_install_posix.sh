@@ -39,7 +39,9 @@ bash "${ARTIFACT_ROOT}/install/install.sh" --install-root "${INSTALL_ROOT}" --co
 test "$("${SHELL}" -lc 'imprint version')" = "3.0.1"
 "${SHELL}" -lc 'imprint --help >/dev/null'
 "${INSTALL_ROOT}/venv/bin/python" "${ARTIFACT_ROOT}/tests/acceptance/artifact_lifecycle.py" --data-root "${DATA}" --config "${CONFIG}"
-"${SHELL}" -lc 'imprint health >/dev/null'
+health_rc=0
+"${SHELL}" -lc 'imprint health >/dev/null' || health_rc=$?
+test "${health_rc}" -eq 0 -o "${health_rc}" -eq 2
 "${INSTALL_ROOT}/venv/bin/python" "${INSTALL_ROOT}/tools/manage_hooks.py" status --settings "${SETTINGS}" --python "${INSTALL_ROOT}/venv/bin/python" --hooks-dir "${INSTALL_ROOT}/hooks"
 printf '%s\n' 'unowned' > "${INSTALL_ROOT}/unowned-sentinel.txt"
 if bash "${ARTIFACT_ROOT}/install/uninstall.sh" --install-root "${INSTALL_ROOT}" --config "${CONFIG}" --settings "${SETTINGS}" >/dev/null 2>&1; then

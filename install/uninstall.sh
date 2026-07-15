@@ -21,6 +21,11 @@ if [ -z "${INSTALL_ROOT}" ] || [ "${INSTALL_ROOT}" = "/" ] || [ "${INSTALL_ROOT}
   echo "Refusing an unsafe install root: ${INSTALL_ROOT}" >&2
   exit 2
 fi
+if [ ! -d "${INSTALL_ROOT}" ]; then
+  echo "Refusing to remove a missing install root: ${INSTALL_ROOT}" >&2
+  exit 2
+fi
+INSTALL_ROOT="$(cd "${INSTALL_ROOT}" && pwd -P)"
 MARKER="${INSTALL_ROOT}/.imprint-install-root"
 if [ ! -f "${MARKER}" ] || [ "$(cat "${MARKER}")" != "imprint-local:3.0.1" ]; then
   echo "Refusing to remove an install root without Imprint's ownership marker: ${INSTALL_ROOT}" >&2

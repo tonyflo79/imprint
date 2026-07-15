@@ -49,6 +49,7 @@ def record(root: Path) -> None:
         _entry(path, root)
         for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())
         if path.name not in {MARKER, MANIFEST}
+        and not _is_runtime_cache(path.relative_to(root).as_posix())
     ]
     payload = {"format": 1, "product": "imprint-local", "version": VERSION, "entries": entries}
     destination = root / MANIFEST
