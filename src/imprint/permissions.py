@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -82,6 +83,9 @@ def unsafe_windows_permissions(root: Path) -> tuple[str, ...]:
     inspectable = [str(path) for path in candidates if path.is_dir() or path.is_file()]
     script = r"""
 $ErrorActionPreference = 'Stop'
+$utf8 = [Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
 $paths = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $current = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $allowed = @($current, 'S-1-5-18')
@@ -106,22 +110,26 @@ foreach ($path in $paths) {
 ConvertTo-Json -Compress -InputObject @($unsafe)
 """
     try:
+        executable = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+        if executable is None:
+            return ("<acl-inspection-failed>",)
         result = subprocess.run(
-            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+            [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
             input=json.dumps(inspectable),
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
             timeout=30,
         )
         if result.returncode != 0:
-            return (".",)
+            return ("<acl-inspection-failed>",)
         reported = json.loads(result.stdout or "[]")
         if not isinstance(reported, list) or any(not isinstance(item, str) for item in reported):
-            return (".",)
+            return ("<acl-inspection-failed>",)
         unsafe.extend(str(Path(item).relative_to(base)) or "." for item in reported)
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
-        return (".",)
+        return ("<acl-inspection-failed>",)
     return tuple(sorted(set(unsafe)))
 
 

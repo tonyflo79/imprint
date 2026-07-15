@@ -196,6 +196,15 @@ def test_windows_installer_sets_private_owner_before_acl_grants() -> None:
     assert owner < grants
 
 
+def test_windows_acl_inspection_is_utf8_and_fail_closed() -> None:
+    script = (ROOT / "src" / "imprint" / "permissions.py").read_text(encoding="utf-8")
+    assert 'shutil.which("pwsh.exe") or shutil.which("powershell.exe")' in script
+    assert '[Console]::InputEncoding = $utf8' in script
+    assert '[Console]::OutputEncoding = $utf8' in script
+    assert 'encoding="utf-8"' in script
+    assert 'return ("<acl-inspection-failed>",)' in script
+
+
 def test_release_provenance_covers_every_shipped_and_build_input() -> None:
     package = load("package_for_provenance_test", "tools/release/package.py")
     verifier = load("verify_source_tree_digest", "tools/release/verify_artifacts.py")

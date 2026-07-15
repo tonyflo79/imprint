@@ -108,6 +108,17 @@ def main() -> int:
         [str(executable), "health"], text=True, capture_output=True,
         env=installed_env, check=False,
     )
+    if health.returncode != 0 and os.name == "nt":
+        permission_probe = run([
+            python, "-c",
+            "from pathlib import Path; from imprint.permissions import unsafe_windows_permissions; "
+            "import sys; print(unsafe_windows_permissions(Path(sys.argv[1])))",
+            str(operator_root),
+        ], env)
+        raise AssertionError(
+            health.stdout + health.stderr + "\npermission_probe="
+            + permission_probe.stdout + permission_probe.stderr
+        )
     assert health.returncode == 0, health.stdout + health.stderr
     assert json.loads(health.stdout)["status"] == "healthy"
 
