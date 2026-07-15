@@ -155,4 +155,19 @@ JSON-LD exports include `ontologySchemaVersion`, semantic payloads, evidence,
 operator identity, provenance, authority, typed endpoints, and bitemporal
 intervals directly in `@graph`, plus the complete lossless ledger. Imports
 require both compatible store and ontology schema versions and verify hashes
-before writing an empty store.
+before writing an empty store. Import does not trust those hashes for meaning:
+it re-runs the typed node and relation contracts, re-checks consent for every
+observed record, and enforces the authority lattice on every version — so a
+document cannot smuggle ratified or model-authored authority, or a
+consent-bearing observation, by pointing a record at an unexpected creation
+event. Import fails closed rather than lowering any of these checks.
+
+Two scope caveats. The lossless guarantee covers the canonical database, not the
+local operator identity: `identity.json` is outside the export, so importing into
+a fresh operator root mints a new operator URN and later writes against the
+imported records will fail the operator-match checks unless you carry the
+original identity across as well. And because import pins the exact store schema
+(`3.0.0`) and column sets, a store that has taken an additive migration is not
+re-importable through this path; export before migrating if you need a portable
+copy. `--dry-run` validates the full document and writes nothing, not even an
+empty database file.

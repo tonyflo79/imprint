@@ -175,6 +175,20 @@ def test_jsonld_revalidates_typed_rows_and_rolls_back_graph_mismatch(tmp_path, c
         assert events_exists == 0
 
 
+def test_ratified_business_relationship_requires_endpoint_operator(tmp_path, capture_envelope):
+    store = ImprintStore(tmp_path / "imprint.db")
+    store.initialize()
+    store.apply_capture(capture_envelope)
+    source = _business_node(store, capture_envelope, "Offer", "Advisory")
+    target = _business_node(store, capture_envelope, "Result", "Growth")
+    evidence = [capture_envelope["evidence"][0]["evidence_id"]]
+    with pytest.raises(ValidationError, match="authored by the endpoint operator"):
+        append_business_relationship(
+            store, source_id=source, target_id=target, relation_type="confirms",
+            evidence_mode="ratified", evidence_ids=evidence, why="forged authority", actor_id="test",
+        )
+
+
 def test_adapter_requires_lossless_export():
     with pytest.raises(ValidationError):
         generic_graph({"@graph": []})

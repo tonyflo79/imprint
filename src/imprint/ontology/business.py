@@ -37,7 +37,13 @@ def append_business_relationship(
     actor_id: str,
     metadata: dict[str, Any] | None = None,
 ) -> str:
-    """Append one evidence-linked relation without merging other evidence modes."""
+    """Append one evidence-linked relation without merging other evidence modes.
+
+    Internal writer helper: not wired to the CLI or hooks. It constructs
+    provenance directly, so it enforces the operator-identity pin and refuses to
+    mint ``ratified`` authority for anyone other than the endpoint operator, to
+    match the guarantees the strict semantic relation writer provides.
+    """
     if relation_type not in RELATION_TYPES:
         raise ValidationError("unsupported business relation type")
     if evidence_mode not in EVIDENCE_MODES:
@@ -85,6 +91,9 @@ def append_business_relationship(
         if len(operator_ids) != 1:
             raise ValidationError("cross-operator relationship is forbidden")
         operator_id = operator_ids.pop()
+        store._require_configured_operator(operator_id)
+        if evidence_mode == "ratified" and actor_id != operator_id:
+            raise ValidationError("ratified business relationship must be authored by the endpoint operator")
         conn.execute(
             "INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?)",
             (event_id, "derived", operator_id, now, now,

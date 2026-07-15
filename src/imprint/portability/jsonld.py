@@ -7,13 +7,37 @@ import json
 from datetime import datetime
 from typing import Any
 
-from imprint.constants import ONTOLOGY_SCHEMA_VERSION, STORE_SCHEMA_VERSION
+from imprint.constants import (
+    AUTHORITY_TIERS,
+    ONTOLOGY_SCHEMA_VERSION,
+    PROVENANCE,
+    STORE_SCHEMA_VERSION,
+)
 from imprint.errors import ConflictError, ValidationError
 from imprint.ontology.schema import canonical_bytes
-from imprint.ontology.contracts import validate_node_contract, validate_relation_contract
+from imprint.ontology.contracts import (
+    NODE_TYPES,
+    validate_node_contract,
+    validate_relation_contract,
+)
 from imprint.ontology.references import validate_payload_references
 from imprint.projections.jsonld import CONTEXT
 from imprint.store import ImprintStore
+
+# Node types the canonical writer produces only through the strict semantic
+# contract path (append_semantic_node), i.e. everything except the raw-capture
+# and derived/proposal families. A record of one of these types therefore MUST
+# have been created by a ``semantic_*`` event; if an imported document presents
+# one with any other creation event, it is refusing to be re-validated and is
+# rejected. This is what stops a document from tagging a SelfModelAssertion or a
+# consent-bearing Observation with a ``captured`` creation event to skip the
+# typed contract and consent re-checks below.
+_CAPTURE_NODE_TYPES = frozenset({"Case", "Verdict", "Call", "Alternative"})
+_DERIVED_NODE_TYPES = frozenset({
+    "Principle", "Belief", "Value", "Rule", "Domain", "Pattern",
+    "FeedbackProfile", "Proposal",
+})
+SEMANTIC_ONLY_NODE_TYPES = frozenset(NODE_TYPES) - _CAPTURE_NODE_TYPES - _DERIVED_NODE_TYPES
 
 
 TABLES = (
@@ -156,6 +180,51 @@ def _contract_provenance(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _assert_provenance_floor(kind: str, status: Any, tier: Any, provenance: dict[str, Any]) -> None:
+    """Enforce the authority lattice on every imported version, of any type.
+
+    This mirrors the status/tier/actor/model/ratifier rules of
+    ``validate_provenance_contract`` but without the ontology-URN actor shape, so
+    it also covers rows written by the capture, domain, transition, and derived
+    writers (which use free-form actor identifiers). Trusting only the internal
+    self-consistency gates (hashes, @graph, digest) is not enough: those are all
+    recomputable by whoever authored the document. The floor is what prevents an
+    imported record from declaring ``ratified``/``ratified_knowledge`` or
+    model-authored authority that the originating writer would never have granted.
+    """
+    actor_class = provenance.get("actor_class")
+    model = provenance.get("model")
+    ratifier = provenance.get("ratifier", provenance.get("ratifier_id"))
+    if status not in PROVENANCE or tier not in AUTHORITY_TIERS:
+        raise ValidationError(f"{kind} has an unsupported provenance status or authority tier")
+    if actor_class not in {"operator", "software", "model", "importer"}:
+        raise ValidationError(f"{kind} has an unsupported provenance actor_class")
+    if status == "captured":
+        if tier != "captured_judgment" or actor_class != "operator" or model is not None or ratifier is not None:
+            raise ValidationError(f"{kind} captured authority cannot be escalated or model-authored")
+    elif status == "extracted":
+        if tier not in {"imported_floor", "observed_candidate"} or ratifier is not None:
+            raise ValidationError(f"{kind} extracted authority cannot be ratified")
+    elif status == "inferred":
+        if tier != "inferred_candidate" or actor_class not in {"model", "software"} or ratifier is not None:
+            raise ValidationError(f"{kind} inferred authority must remain a machine candidate")
+        if actor_class == "model" and not model:
+            raise ValidationError(f"{kind} model inference must identify its model")
+    elif status == "ratified":
+        if tier != "ratified_knowledge" or actor_class != "operator" or ratifier is None:
+            raise ValidationError(f"{kind} ratified authority requires operator ratification")
+
+
+def _version_provenance(row: dict[str, Any], kind: str) -> dict[str, Any]:
+    try:
+        provenance = json.loads(row["provenance_json"])
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"invalid {kind} provenance JSON") from exc
+    if not isinstance(provenance, dict):
+        raise ValidationError(f"{kind} provenance must be an object")
+    return provenance
+
+
 def _validate_semantic_rows(
     ledger: dict[str, list[dict[str, Any]]], ontology_version: str,
 ) -> None:
@@ -210,6 +279,21 @@ def _validate_semantic_rows(
             if created_payload != expected_creation:
                 raise ValidationError("typed node creation event does not match its created version")
             typed_nodes.add(node_id)
+        elif node["node_type"] in SEMANTIC_ONLY_NODE_TYPES:
+            # A semantic-only type can only originate from append_semantic_node,
+            # which always stamps a semantic_* creation event. Any other creation
+            # event means the document is trying to route it around the typed
+            # contract and consent re-checks below.
+            raise ValidationError("typed semantic node has a non-semantic creation event")
+
+    # Authority floor first, for EVERY version regardless of writer family, so a
+    # forged ratified/model tier on a capture- or derived-family record is caught
+    # even though such records are not re-run through the typed node contract.
+    for row in ledger["node_versions"]:
+        _assert_provenance_floor(
+            "node version", row["provenance_status"], row["authority_tier"],
+            _version_provenance(row, "node version"),
+        )
 
     for row in ledger["node_versions"]:
         if row["node_id"] not in typed_nodes:
@@ -268,6 +352,10 @@ def _validate_semantic_rows(
                     raise ValidationError("ConsentGrant does not authorize imported semantic observation")
 
     for row in ledger["edge_versions"]:
+        _assert_provenance_floor(
+            "edge version", row["provenance_status"], row["authority_tier"],
+            _version_provenance(row, "edge version"),
+        )
         edge = edges[row["edge_id"]]
         created = events.get(edge["created_event_id"])
         if not created or created["event_type"] != "semantic_relation":
@@ -317,13 +405,20 @@ def import_jsonld(store: ImprintStore, document: dict[str, Any], *, dry_run: boo
     _validate_semantic_rows(ledger, document["ontologySchemaVersion"])
     if document.get("@graph") != _graph_from_ledger(ledger):
         raise ValidationError("JSON-LD graph does not match its canonical ledger")
+    if dry_run:
+        # A dry run must not touch the filesystem. A store that does not exist yet
+        # is trivially empty; only an existing store needs the emptiness check.
+        if store.path.exists():
+            with store.connect() as conn:
+                non_meta = sum(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES if table != "meta")
+            if non_meta:
+                raise ConflictError("JSON-LD import requires an empty compatible store")
+        return document["imprint:semanticSha256"]
     store.initialize()
     with store.connect() as conn:
         non_meta = sum(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES if table != "meta")
         if non_meta:
             raise ConflictError("JSON-LD import requires an empty compatible store")
-        if dry_run:
-            return document["imprint:semanticSha256"]
         conn.execute("BEGIN IMMEDIATE")
         for table in TABLES:
             rows = ledger[table]

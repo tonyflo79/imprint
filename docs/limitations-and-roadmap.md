@@ -6,8 +6,11 @@
   failures are visible and must be revalidated against new Claude Code releases.
 - The default retrieval budget is byte-based and deterministic, not a promise of
   an exact model-token count.
-- Canonical SQLite is single-writer. Unsynchronized shared writers are refused;
-  this release is not a collaborative database service.
+- Canonical SQLite is single-writer and this release is not a collaborative
+  database service. Data roots under recognized cloud-sync folders (Dropbox,
+  OneDrive, iCloud/`CloudStorage`, Google Drive) are refused by name; other
+  network or shared file systems are unsupported but not automatically detected,
+  so keep the data root on a local disk.
 - Cold-start input still requires conservative operator review. A source being
   parseable does not make it authoritative.
 - Digest generation and profile learning are experimental, disabled by default,

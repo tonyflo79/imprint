@@ -104,6 +104,7 @@ imprint derive --pending
 imprint retrieve --session SESSION_ID --prompt "current task"
 imprint review list
 imprint review ratify NODE_ID --by OPERATOR_ID
+imprint review reject NODE_ID --by OPERATOR_ID --reason "not a real pattern"
 imprint review defer NODE_ID --by OPERATOR_ID --reason "needs more evidence" --revisit-after RFC3339
 imprint ontology add-node --input TYPED_NODE.json --valid-from RFC3339
 imprint ontology add-relation --input TYPED_RELATION.json --valid-from RFC3339
@@ -121,8 +122,11 @@ imprint verdict add-reason VERDICT_ID --reason "stated reason" --by OPERATOR_ID
 imprint ingest scan --input candidates.json
 imprint ingest keep ITEM_ID --why "why this belongs in the research floor"
 imprint export --format jsonld --output imprint-export.jsonld
+imprint export --format markdown --output imprint.md
 imprint import --format jsonld --input imprint-export.jsonld --dry-run
 imprint backup create
+imprint backup verify /path/to/backup.sqlite3
+imprint backup restore /path/to/backup.sqlite3 --confirm backup.sqlite3
 imprint delete purge --scope EXACT_ID --preview
 imprint migrate verify
 imprint experimental status
