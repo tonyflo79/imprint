@@ -66,6 +66,7 @@ def load_allowlist() -> list[str]:
 
 def release_inputs(allowlist: list[str]) -> list[Path]:
     candidates = {
+        ROOT / ".gitignore",
         ROOT / "pyproject.toml",
         ROOT / "tools" / "release" / "package.py",
         *(ROOT / item for item in allowlist),

@@ -16,4 +16,4 @@ build/
 *.tmp
 *.sync-conflict-*
 release-artifacts/
-
+results.sarif
