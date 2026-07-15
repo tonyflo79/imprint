@@ -18,13 +18,25 @@ $Python = Join-Path $InstallRoot "venv\Scripts\python.exe"
 $Manager = Join-Path $InstallRoot "tools\manage_hooks.py"
 $Ownership = Join-Path $InstallRoot "tools\install_ownership.py"
 if (-not (Test-Path $Python -PathType Leaf) -or -not (Test-Path $Ownership -PathType Leaf)) { throw "Refusing uninstall because ownership tooling is missing." }
+$BasePython = (& $Python -c "import sys; print(sys._base_executable)").Trim()
+if ($LASTEXITCODE -ne 0 -or -not $BasePython -or -not (Test-Path $BasePython -PathType Leaf)) { throw "Unable to locate the external Python interpreter required for safe removal." }
 & $Python $Ownership verify --root $InstallRoot
 if ($LASTEXITCODE -ne 0) { throw "Installed-file ownership verification failed; installation was left intact." }
 if (Test-Path $Manager) {
     & $Python $Manager unregister --settings $Settings --python $Python --hooks-dir (Join-Path $InstallRoot "hooks")
     if ($LASTEXITCODE -ne 0) { throw "Managed hook removal failed; installation was left intact." }
 }
-& $Python $Ownership uninstall --root $InstallRoot
-if ($LASTEXITCODE -ne 0) { throw "Conservative installed-file removal failed." }
+$RemovalState = Join-Path ([IO.Path]::GetTempPath()) ("imprint-uninstall-" + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $RemovalState | Out-Null
+try {
+    $StagedOwnership = Join-Path $RemovalState "install_ownership.py"
+    Copy-Item $Ownership $StagedOwnership
+    # Windows locks a running executable. Use the venv's external base
+    # interpreter so the owned venv\Scripts\python.exe can be removed safely.
+    & $BasePython $StagedOwnership uninstall --root $InstallRoot
+    if ($LASTEXITCODE -ne 0) { throw "Conservative installed-file removal failed." }
+} finally {
+    Remove-Item $RemovalState -Recurse -Force -ErrorAction SilentlyContinue
+}
 if ($PurgeConfig -and (Test-Path $Config)) { Remove-Item $Config -Force }
 Write-Host "Imprint code and managed hooks removed. Captured data was preserved."

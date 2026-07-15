@@ -76,3 +76,10 @@ def test_ownership_manifest_refuses_unknown_or_mutated_files(tmp_path: Path) -> 
     owned.write_text("changed", encoding="utf-8")
     with pytest.raises(SystemExit, match="changed since installation"):
         ownership.verify(root)
+
+
+def test_windows_uninstaller_stages_cleanup_outside_owned_venv() -> None:
+    script = (ROOT / "install" / "uninstall.ps1").read_text(encoding="utf-8")
+    assert "sys._base_executable" in script
+    assert "& $BasePython $StagedOwnership uninstall --root $InstallRoot" in script
+    assert "& $Python $Ownership uninstall --root $InstallRoot" not in script

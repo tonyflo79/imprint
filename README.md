@@ -107,6 +107,11 @@ imprint review ratify NODE_ID --by OPERATOR_ID
 imprint review defer NODE_ID --by OPERATOR_ID --reason "needs more evidence" --revisit-after RFC3339
 imprint ontology add-node --input TYPED_NODE.json --valid-from RFC3339
 imprint ontology add-relation --input TYPED_RELATION.json --valid-from RFC3339
+imprint consent grant --input CONSENT_GRANT.json --valid-from RFC3339
+imprint consent list
+imprint consent revoke GRANT_URN --by OPERATOR_URN --reason "reason"
+imprint observation add --input OBSERVATION.json --valid-from RFC3339
+imprint outcome add --input OUTCOME.json --valid-from RFC3339
 imprint domain add research --label "Research" --description "Source-grounded research" --evidence EVIDENCE_ID --by OPERATOR_ID
 imprint domain select research --by OPERATOR_ID
 imprint domain freeze research --by OPERATOR_ID

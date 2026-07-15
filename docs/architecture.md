@@ -53,7 +53,9 @@ evidence channels:
    ratification; defer and confirmation remain durable review states.
 3. **Chosen direction:** self-authored, operator-ratified ChosenFuture records
    are physically distinguished from inferred DefaultFuture projections.
-   DirectionScores cite the exact ChosenFuture version they assess.
+   DirectionScores cite the exact ChosenFuture version they assess, but are
+   validation-only analytical output: the canonical writer and importer never
+   persist them as operator knowledge.
 4. **Business/world model:** declared market and operating relationships remain
    separate from observed purchases, usage, support, results, refunds,
    retention, and referrals. Each relation states its evidence mode.

@@ -111,7 +111,9 @@ Every rendered retrieval record carries an `ontology` object with its semantic
 `chosen_future`, `default_future`, `direction_comparison`,
 `business_declared`, and `business_observed`. Declared business theory and
 observed operating evidence therefore remain distinguishable even when both
-are deliberately requested.
+are deliberately requested. `direction_comparison` labels transient analytical
+output only; because DirectionScore is non-persistent, canonical stored-record
+retrieval cannot populate that partition.
 
 Retrieval defaults to `authoritative`. That mode excludes every inference and
 admits a `SelfModelAssertion` only after operator ratification. `DefaultFuture`
@@ -135,9 +137,10 @@ Consent is checked inside the canonical writer. A JSON field that merely names
 a grant is insufficient: the referenced grant must exist, belong to the same
 operator, be unexpired and unrevoked, and authorize the attempted write.
 Day-based retention expires from `effective_from`; it is not advisory metadata.
-Inspect and revoke grants through the append-only control surface:
+Create, inspect, and revoke grants through the append-only control surface:
 
 ```bash
+imprint consent grant --input CONSENT_GRANT.json --valid-from RFC3339
 imprint consent list
 imprint consent revoke GRANT_URN --by OPERATOR_URN --reason "reason"
 ```
