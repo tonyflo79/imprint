@@ -189,6 +189,13 @@ def test_windows_uninstaller_stages_cleanup_outside_owned_venv() -> None:
     assert "& $Python $Ownership uninstall --root $InstallRoot" not in script
 
 
+def test_windows_installer_sets_private_owner_before_acl_grants() -> None:
+    script = (ROOT / "install" / "install.ps1").read_text(encoding="utf-8")
+    owner = script.index('/setowner "*$Sid"')
+    grants = script.index("/inheritance:r /grant:r")
+    assert owner < grants
+
+
 def test_release_provenance_covers_every_shipped_and_build_input() -> None:
     package = load("package_for_provenance_test", "tools/release/package.py")
     verifier = load("verify_source_tree_digest", "tools/release/verify_artifacts.py")

@@ -18,6 +18,8 @@ function Set-PrivateAcl([string]$Path) {
     $Item = Get-Item $Path -Force
     $UserGrant = if ($Item.PSIsContainer) { "*$Sid`:(OI)(CI)F" } else { "*$Sid`:F" }
     $SystemGrant = if ($Item.PSIsContainer) { "*S-1-5-18`:(OI)(CI)F" } else { "*S-1-5-18`:F" }
+    & icacls.exe $Path /setowner "*$Sid" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Unable to set the private Imprint path owner: $Path" }
     & icacls.exe $Path /inheritance:r /grant:r $UserGrant $SystemGrant | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Unable to restrict private Imprint path: $Path" }
 }
