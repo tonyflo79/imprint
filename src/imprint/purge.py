@@ -26,8 +26,10 @@ def _write_private_text(path: Path, content: str) -> None:
     secure_directory(path.parent)
     fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
     temporary = Path(temporary_name)
+    os.close(fd)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        secure_file(temporary)
+        with temporary.open("w", encoding="utf-8") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())

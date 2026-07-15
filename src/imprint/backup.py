@@ -245,6 +245,10 @@ def restore_backup(store: ImprintStore, root: Path, source: Path, *, confirmatio
             try:
                 os.link(store.path, rollback)
             except OSError:
+                if rollback.exists() or rollback.is_symlink():
+                    raise SafetyError("refusing an existing restore rollback path")
+                rollback.touch(exist_ok=False)
+                secure_file(rollback)
                 shutil.copyfile(store.path, rollback)
             secure_file(rollback)
         # Recheck immediately before replacement so neither source substitution

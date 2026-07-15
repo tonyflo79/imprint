@@ -34,8 +34,10 @@ def _write_lock_owner(path: Path, owner: dict[str, Any]) -> None:
     data = json.dumps(owner, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
     fd, temporary_name = tempfile.mkstemp(prefix=f".owner-{owner['nonce']}-", suffix=".tmp", dir=path.parent)
     temporary = Path(temporary_name)
+    os.close(fd)
     try:
-        with os.fdopen(fd, "wb") as handle:
+        secure_file(temporary)
+        with temporary.open("wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
@@ -247,18 +249,21 @@ def _quarantine_receipt(operator_root: Path, path: Path, error: Exception) -> No
         secure_file(final)
         return
     fd, temporary = tempfile.mkstemp(prefix=".quarantine-", dir=directory)
+    temporary_path = Path(temporary)
+    os.close(fd)
     try:
-        with os.fdopen(fd, "wb") as handle:
+        secure_file(temporary_path)
+        with temporary_path.open("wb") as handle:
             handle.write(body)
             handle.flush()
             os.fsync(handle.fileno())
-        secure_file(Path(temporary))
+        secure_file(temporary_path)
         try:
             os.link(temporary, final)
         except FileExistsError:
             pass
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        temporary_path.unlink(missing_ok=True)
     if final.exists():
         secure_file(final)
 
@@ -300,8 +305,10 @@ def _write_acknowledgement(
         return
     fd, temporary_name = tempfile.mkstemp(prefix=".ack-", dir=target.parent)
     temporary = Path(temporary_name)
+    os.close(fd)
     try:
-        with os.fdopen(fd, "wb") as handle:
+        secure_file(temporary)
+        with temporary.open("wb") as handle:
             handle.write(json.dumps(body, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -383,8 +390,10 @@ def write_envelope(operator_root: Path, envelope: dict[str, Any]) -> Path:
         raise ConflictError("same spool event path contains different bytes")
     fd, temp_name = tempfile.mkstemp(prefix=".imprint-", suffix=".tmp", dir=spool)
     temp = Path(temp_name)
+    os.close(fd)
     try:
-        with os.fdopen(fd, "wb") as handle:
+        secure_file(temp)
+        with temp.open("wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())

@@ -75,13 +75,16 @@ def _operator_urn(root: Path) -> str:
     secure_directory(root)
     operator_id = f"urn:imprint:operator:{uuid.uuid4()}"
     fd, temporary = tempfile.mkstemp(prefix=".identity-", dir=root)
+    temporary_path = Path(temporary)
+    os.close(fd)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        secure_file(temporary_path)
+        with temporary_path.open("w", encoding="utf-8") as handle:
             json.dump({"identity_schema_version": "1.0.0", "operator_id": operator_id}, handle, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        secure_file(Path(temporary))
+        secure_file(temporary_path)
         try:
             os.chmod(temporary, 0o600)
         except OSError:
@@ -91,7 +94,7 @@ def _operator_urn(root: Path) -> str:
         except FileExistsError:
             return _operator_urn(root)
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        temporary_path.unlink(missing_ok=True)
     secure_file(target)
     return operator_id
 
@@ -112,12 +115,15 @@ def _session_key(root: Path) -> bytes:
     secure_directory(root)
     encoded = secrets.token_hex(32)
     fd, temporary = tempfile.mkstemp(prefix=".session-map-", dir=root)
+    temporary_path = Path(temporary)
+    os.close(fd)
     try:
-        with os.fdopen(fd, "w", encoding="ascii") as handle:
+        secure_file(temporary_path)
+        with temporary_path.open("w", encoding="ascii") as handle:
             handle.write(encoded + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        secure_file(Path(temporary))
+        secure_file(temporary_path)
         try:
             os.chmod(temporary, 0o600)
         except OSError:
@@ -127,7 +133,7 @@ def _session_key(root: Path) -> bytes:
         except FileExistsError:
             return _session_key(root)
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        temporary_path.unlink(missing_ok=True)
     secure_file(target)
     return bytes.fromhex(encoded)
 

@@ -38,12 +38,15 @@ class DeliveryReceipts:
             separators=(",", ":"),
         ).encode("ascii")
         fd, temporary = tempfile.mkstemp(prefix=".receipt-", dir=directory)
+        temporary_path = Path(temporary)
+        os.close(fd)
         try:
-            with os.fdopen(fd, "wb") as handle:
+            secure_file(temporary_path)
+            with temporary_path.open("wb") as handle:
                 handle.write(receipt)
                 handle.flush()
                 os.fsync(handle.fileno())
-            secure_file(Path(temporary))
+            secure_file(temporary_path)
             try:
                 os.link(temporary, final)
                 secure_file(final)
@@ -53,7 +56,7 @@ class DeliveryReceipts:
                 return False
         finally:
             try:
-                os.unlink(temporary)
+                temporary_path.unlink()
             except FileNotFoundError:
                 pass
 
@@ -118,8 +121,10 @@ class DeliveryReceipts:
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         fd, temporary_name = tempfile.mkstemp(prefix=".receipt-", dir=pending.parent)
         temporary = Path(temporary_name)
+        os.close(fd)
         try:
-            with os.fdopen(fd, "wb") as handle:
+            secure_file(temporary)
+            with temporary.open("wb") as handle:
                 handle.write(envelope)
                 handle.flush()
                 os.fsync(handle.fileno())
