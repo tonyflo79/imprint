@@ -1,0 +1,37 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from imprint.config import resolved_operator_root
+from imprint.config import load_config
+from imprint.errors import SafetyError, ValidationError
+
+
+def test_explicit_data_root_with_spaces_is_validated_and_supported(tmp_path):
+    base = tmp_path / "local data with spaces"
+    assert resolved_operator_root({"data_root": str(base), "operator_slug": "operator-a"}) == base / "operator-a"
+
+
+@pytest.mark.parametrize("marker", ["Dropbox", "OneDrive", "CloudStorage", "Google Drive"])
+def test_explicit_sync_root_is_refused(tmp_path, marker):
+    with pytest.raises(SafetyError, match="Cloud-sync"):
+        resolved_operator_root({"data_root": str(tmp_path / marker / "Imprint"), "operator_slug": "operator-a"})
+
+
+def test_home_as_explicit_data_root_is_refused():
+    with pytest.raises(SafetyError, match="root or home"):
+        resolved_operator_root({"data_root": str(Path.home()), "operator_slug": "operator-a"})
+
+
+def test_higher_context_budget_requires_explicit_bounded_opt_in(tmp_path):
+    config = tmp_path / "config.json"
+    config.write_text('{"context_budget_bytes":40000}')
+    with pytest.raises(ValidationError, match="allow_higher_budget"):
+        load_config(config)
+    config.write_text('{"context_budget_bytes":40000,"allow_higher_budget":true}')
+    assert load_config(config)["context_budget_bytes"] == 40000
+    config.write_text('{"context_budget_bytes":131073,"allow_higher_budget":true}')
+    with pytest.raises(ValidationError, match="4096..131072"):
+        load_config(config)
