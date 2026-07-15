@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from imprint.constants import ONTOLOGY_SCHEMA_VERSION, STORE_SCHEMA_VERSION
+from imprint.constants import ONTOLOGY_SCHEMA_VERSION, PRODUCT_VERSION, STORE_SCHEMA_VERSION
 from imprint.errors import ConflictError, ValidationError
 from imprint.capture.schema import validate_capture_envelope
 from imprint.ontology.contracts import validate_node_contract, validate_relation_contract
@@ -34,7 +34,7 @@ def version_provenance(*, status: str, authority_tier: str, actor_class: str,
         "provenance_schema_version": "1.0.0", "status": status,
         "authority_tier": authority_tier, "actor_class": actor_class,
         "actor_id": actor_id, "mechanism": mechanism,
-        "software": {"name": "imprint-local", "version": STORE_SCHEMA_VERSION},
+        "software": {"name": "imprint-local", "version": PRODUCT_VERSION},
         "model": model, "prompt_recipe": prompt_recipe,
         "proposal_id": proposal_id, "ratifier": ratifier,
         "event_id": event_id, "relation": relation,
@@ -83,6 +83,13 @@ class ImprintStore:
             resolved = self.path.resolve(strict=True)
             if not resolved.is_file() or self.path.is_symlink():
                 raise ValidationError("store path must be a regular non-symlink file")
+            sidecars = tuple(
+                Path(str(resolved) + suffix) for suffix in ("-wal", "-shm")
+            )
+            if any(path.exists() for path in sidecars):
+                raise ValidationError(
+                    "store has WAL/SHM sidecars; close the active writer or recover the store before use"
+                )
             uri = f"{resolved.as_uri()}?mode=ro&immutable=1"
             conn = sqlite3.connect(uri, uri=True, timeout=5)
             try:
@@ -105,6 +112,10 @@ class ImprintStore:
                 ).fetchone()
                 if ontology is None:
                     raise ValidationError("existing store is missing ontology_schema_version")
+                if not isinstance(ontology[0], str) or ontology[0] != ONTOLOGY_SCHEMA_VERSION:
+                    raise ValidationError(
+                        f"incompatible ontology schema {ontology[0]!r}; expected {ONTOLOGY_SCHEMA_VERSION}"
+                    )
             finally:
                 conn.close()
         except ValidationError:

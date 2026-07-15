@@ -14,10 +14,17 @@ SETTINGS="${HOME}/.claude/settings.json"
 DATA="${XDG_DATA_HOME}/imprint"
 mkdir -p "${HOME}"
 
+# A failed install must restore exact permissions on pre-existing external paths.
+mkdir -p "$(dirname "${CONFIG}")" "${DATA}"
+chmod 751 "$(dirname "${CONFIG}")"
+chmod 750 "${DATA}"
+config_parent_mode_before="$(stat -f '%Lp' "$(dirname "${CONFIG}")" 2>/dev/null || stat -c '%a' "$(dirname "${CONFIG}")")"
+data_mode_before="$(stat -f '%Lp' "${DATA}" 2>/dev/null || stat -c '%a' "${DATA}")"
+
 UNOWNED="${HOME}/Applications/Unowned App"
 mkdir -p "${UNOWNED}"
 printf '%s\n' 'must-survive' > "${UNOWNED}/sentinel.txt"
-if sh "${ARTIFACT_ROOT}/install/uninstall.sh" --install-root "${UNOWNED}" --config "${CONFIG}" --settings "${SETTINGS}" >/dev/null 2>&1; then
+if bash "${ARTIFACT_ROOT}/install/uninstall.sh" --install-root "${UNOWNED}" --config "${CONFIG}" --settings "${SETTINGS}" >/dev/null 2>&1; then
   echo "Uninstaller accepted an unowned root" >&2
   exit 1
 fi
@@ -31,10 +38,26 @@ if bash "${ARTIFACT_ROOT}/install/install.sh" --install-root "${INSTALL_ROOT}" -
   exit 1
 fi
 test ! -e "${INSTALL_ROOT}/.imprint-install-root"
+test "$(stat -f '%Lp' "$(dirname "${CONFIG}")" 2>/dev/null || stat -c '%a' "$(dirname "${CONFIG}")")" = "${config_parent_mode_before}"
+test "$(stat -f '%Lp' "${DATA}" 2>/dev/null || stat -c '%a' "${DATA}")" = "${data_mode_before}"
 rm -f "${WHEEL}"
 mv "${WHEEL}.valid" "${WHEEL}"
 
+# Exercise the closed 3.0.0 ownership upgrade path before ordinary reinstall.
+mkdir -p "${INSTALL_ROOT}"
+printf '%s\n' legacy > "${INSTALL_ROOT}/legacy-owned.txt"
+python3 "${ARTIFACT_ROOT}/tools/install/install_ownership.py" record --root "${INSTALL_ROOT}"
+python3 - "${INSTALL_ROOT}/.imprint-owned-files.json" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["version"] = "3.0.0"
+path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+printf '%s\n' 'imprint-local:3.0.0' > "${INSTALL_ROOT}/.imprint-install-root"
 bash "${ARTIFACT_ROOT}/install/install.sh" --install-root "${INSTALL_ROOT}" --config "${CONFIG}" --settings "${SETTINGS}" --data-root "${DATA}"
+test ! -e "${INSTALL_ROOT}/legacy-owned.txt"
 bash "${ARTIFACT_ROOT}/install/install.sh" --install-root "${INSTALL_ROOT}" --config "${CONFIG}" --settings "${SETTINGS}" --data-root "${DATA}"
 test "$("${SHELL}" -lc 'imprint version')" = "3.0.1"
 "${SHELL}" -lc 'imprint --help >/dev/null'

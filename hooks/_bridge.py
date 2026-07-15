@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
@@ -44,6 +45,7 @@ def run(action: str) -> int:
             capture_output=True,
             check=False,
             timeout=HOOK_TIMEOUT_SECONDS,
+            env=dict(os.environ, IMPRINT_DEFER_DELIVERY_COMMIT="1"),
         )
     except subprocess.TimeoutExpired:
         return _failure(action, "hook_action_timeout")
@@ -52,5 +54,22 @@ def run(action: str) -> int:
     if process.returncode:
         return _failure(action, "hook_action_failed")
     if process.stdout:
-        sys.stdout.write(process.stdout)
+        try:
+            body = json.loads(process.stdout)
+        except json.JSONDecodeError:
+            return _failure(action, "hook_output_invalid")
+        delivery = body.pop("_imprint_delivery", None) if isinstance(body, dict) else None
+        sys.stdout.write(json.dumps(body, sort_keys=True) + "\n")
+        sys.stdout.flush()
+        if delivery is not None:
+            # The payload is already visible to the hook consumer. A failed
+            # commit intentionally leaves the pending cache for replay.
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "imprint.cli", "delivery-commit"],
+                    input=json.dumps(delivery, sort_keys=True), text=True,
+                    capture_output=True, check=False, timeout=HOOK_TIMEOUT_SECONDS,
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                pass
     return 0

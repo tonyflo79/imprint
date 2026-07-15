@@ -59,7 +59,6 @@ def retrieve_payload(store, *, root: Path, session_id: str, prompt: str = "", ex
             return {"status": "already_delivered", "snapshot_id": snapshot_id, "payload": "", "selected_ids": []}
         if pending.exists():
             cached = receipts._decode_prepared(pending)
-            receipts.commit_delivery(safe_session, snapshot_id, receipt_domain)
             return cached
     result = engine.retrieve(snapshot_id=snapshot_id, query=prompt, selected_domain=explicit_domain)
     response: dict[str, object] = {
@@ -87,13 +86,23 @@ def retrieve_payload(store, *, root: Path, session_id: str, prompt: str = "", ex
     if state == "delivered":
         return {"status": "already_delivered", "snapshot_id": snapshot_id, "payload": "", "selected_ids": []}
     assert cached is not None
-    receipts.commit_delivery(safe_session, snapshot_id, receipt_domain)
     return cached
+
+
+def commit_payload_delivery(
+    *, root: Path, session_id: str, snapshot_id: str, domain_id: str | None = None,
+) -> bool:
+    """Commit a prepared delivery only after its caller flushed the payload."""
+    safe_session = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
+    return DeliveryReceipts(Path(root) / "receipts").commit_delivery(
+        safe_session, snapshot_id, domain_id,
+    )
 
 __all__ = [
     "BUSINESS_DECLARED_PARTITION",
     "BUSINESS_OBSERVED_PARTITION",
     "CHOSEN_FUTURE_PARTITION",
+    "commit_payload_delivery",
     "DEFAULT_FUTURE_PARTITION",
     "AuthorityMode",
     "DeliveryReceipts",

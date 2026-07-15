@@ -177,7 +177,7 @@ def test_compiler_lock_state_and_exact_nonce_stale_recovery(tmp_path, monkeypatc
     lock = root / "compiler.lock"
     lock.mkdir(parents=True)
     assert compiler_lock_state(root)["state"] == "invalid"
-    with pytest.raises(SafetyError, match="exact owner nonce"):
+    with pytest.raises(SafetyError, match="RECOVER-INVALID-LOCK"):
         recover_stale_compiler_lock(root, confirmation="anything")
 
     nonce = "a" * 32

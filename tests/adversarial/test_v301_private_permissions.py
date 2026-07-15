@@ -8,7 +8,7 @@ import pytest
 
 from imprint.backup import create_backup
 from imprint.compiler import compile_spools, write_envelope
-from imprint.permissions import secure_directory, secure_file, secure_tree, unsafe_posix_permissions
+from imprint.permissions import secure_directory, secure_file, secure_tree, unsafe_posix_permissions, unsafe_private_permissions
 from imprint.store import ImprintStore
 
 
@@ -37,6 +37,7 @@ def test_secure_tree_closes_permissive_umask_state(tmp_path):
     assert _mode(nested) == 0o700
     assert _mode(database) == 0o600
     assert unsafe_posix_permissions(root) == ()
+    assert unsafe_private_permissions(root) == ()
 
 
 def test_secure_helpers_refuse_symlinks(tmp_path):

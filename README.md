@@ -44,7 +44,7 @@ then run the installer inside it. Paths containing spaces are supported.
 macOS or Linux:
 
 ```bash
-sh install/install.sh
+bash install/install.sh
 ```
 
 Windows PowerShell 7:
@@ -165,7 +165,7 @@ require a current source-specific `ConsentGrant`.
 macOS or Linux:
 
 ```bash
-sh install/uninstall.sh
+bash install/uninstall.sh
 ```
 
 Windows:

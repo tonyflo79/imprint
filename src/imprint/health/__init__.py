@@ -137,8 +137,8 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
             # ValidationError is deliberately collapsed into content-free health evidence.
             invalid_backup_count += 1
     backup_verified = verified_backup_count > 0 and invalid_backup_count == 0
-    from imprint.permissions import unsafe_posix_permissions
-    unsafe_permissions = unsafe_posix_permissions(root)
+    from imprint.permissions import unsafe_private_permissions
+    unsafe_permissions = unsafe_private_permissions(root)
     temporary_residue = _temporary_residue(root)
     report = evaluate_health(HealthInputs(
         compiler_count=1 if config.get("compiler") else 0,

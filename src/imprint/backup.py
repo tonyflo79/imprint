@@ -5,17 +5,26 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import shutil
 import sqlite3
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .constants import STORE_SCHEMA_VERSION
+from .constants import ONTOLOGY_SCHEMA_VERSION, STORE_SCHEMA_VERSION
 from .errors import SafetyError, ValidationError
 from .paths import validate_data_root
 from .permissions import secure_directory, secure_file
 from .store import ImprintStore
+
+
+_RECEIPT_FIELDS = {
+    "backup_schema_version", "store_schema_version", "file", "sha256",
+    "bytes", "integrity",
+}
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _stamp() -> str:
@@ -28,6 +37,67 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _sidecars(path: Path) -> tuple[Path, Path]:
+    return Path(str(path) + "-wal"), Path(str(path) + "-shm")
+
+
+def _inspect_database(path: Path) -> dict[str, str]:
+    """Validate a closed standalone database without creating sidecars."""
+    if any(sidecar.exists() for sidecar in _sidecars(path)):
+        raise ValidationError("database has WAL/SHM sidecars and is not a closed backup")
+    try:
+        resolved = path.resolve(strict=True)
+        if path.is_symlink() or not resolved.is_file():
+            raise ValidationError("database must be a regular non-symlink file")
+        connection = sqlite3.connect(
+            f"{resolved.as_uri()}?mode=ro&immutable=1", uri=True, timeout=5,
+        )
+        try:
+            integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+            store_row = connection.execute(
+                "SELECT value FROM meta WHERE key='store_schema_version'"
+            ).fetchone()
+            ontology_row = connection.execute(
+                "SELECT value FROM meta WHERE key='ontology_schema_version'"
+            ).fetchone()
+        finally:
+            connection.close()
+    except ValidationError:
+        raise
+    except (OSError, sqlite3.DatabaseError, TypeError) as exc:
+        raise ValidationError("database is corrupt or missing schema metadata") from exc
+    if integrity != "ok":
+        raise ValidationError(f"backup integrity failed: {integrity}")
+    if not store_row or store_row[0] != STORE_SCHEMA_VERSION:
+        raise ValidationError("backup store schema is incompatible")
+    if not ontology_row or ontology_row[0] != ONTOLOGY_SCHEMA_VERSION:
+        raise ValidationError("backup ontology schema is incompatible")
+    return {
+        "integrity": integrity,
+        "store_schema_version": str(store_row[0]),
+        "ontology_schema_version": str(ontology_row[0]),
+    }
+
+
+def _validate_receipt(receipt: Any, target: Path) -> dict[str, Any]:
+    if not isinstance(receipt, dict) or set(receipt) != _RECEIPT_FIELDS:
+        raise ValidationError("backup receipt has unknown or missing fields")
+    if receipt["backup_schema_version"] != "1.0.0":
+        raise ValidationError("unsupported backup receipt schema")
+    if receipt["store_schema_version"] != STORE_SCHEMA_VERSION:
+        raise ValidationError("backup schema does not match supported store schema")
+    if receipt["file"] != target.name or receipt["integrity"] != "ok":
+        raise ValidationError("backup receipt identity or integrity claim is invalid")
+    if not isinstance(receipt["sha256"], str) or not _SHA256.fullmatch(receipt["sha256"]):
+        raise ValidationError("backup receipt hash is invalid")
+    if (
+        not isinstance(receipt["bytes"], int) or isinstance(receipt["bytes"], bool)
+        or receipt["bytes"] <= 0
+    ):
+        raise ValidationError("backup receipt byte count is invalid")
+    return receipt
 
 
 def _safe_backup_path(root: Path, output: Path | None) -> Path:
@@ -61,13 +131,7 @@ def create_backup(store: ImprintStore, root: Path, output: Path | None = None) -
         finally:
             destination.close()
             source.close()
-        check = sqlite3.connect(temporary)
-        try:
-            integrity = str(check.execute("PRAGMA integrity_check").fetchone()[0])
-        finally:
-            check.close()
-        if integrity != "ok":
-            raise ValidationError(f"backup integrity failed: {integrity}")
+        inspected = _inspect_database(temporary)
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
@@ -78,7 +142,7 @@ def create_backup(store: ImprintStore, root: Path, output: Path | None = None) -
         "file": target.name,
         "sha256": _sha256(target),
         "bytes": target.stat().st_size,
-        "integrity": "ok",
+        "integrity": inspected["integrity"],
     }
     receipt_path = target.with_suffix(target.suffix + ".receipt.json")
     receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
@@ -87,67 +151,71 @@ def create_backup(store: ImprintStore, root: Path, output: Path | None = None) -
 
 
 def verify_backup(path: Path) -> dict[str, Any]:
-    target = path.expanduser().resolve(strict=True)
+    supplied = path.expanduser()
+    if supplied.is_symlink():
+        raise ValidationError("backup must be a regular non-symlink file")
+    target = supplied.resolve(strict=True)
     receipt_path = target.with_suffix(target.suffix + ".receipt.json")
-    if not receipt_path.exists():
+    if not receipt_path.exists() or receipt_path.is_symlink():
         raise ValidationError("backup receipt is missing")
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    actual_hash = _sha256(target)
-    if actual_hash != receipt.get("sha256"):
-        raise ValidationError("backup hash does not match receipt")
-    connection = sqlite3.connect(target)
     try:
-        integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
-        version_row = connection.execute(
-            "SELECT value FROM meta WHERE key='store_schema_version'"
-        ).fetchone()
-    finally:
-        connection.close()
-    if integrity != "ok":
-        raise ValidationError(f"backup integrity failed: {integrity}")
-    if not version_row or version_row[0] != receipt.get("store_schema_version"):
-        raise ValidationError("backup schema does not match receipt")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValidationError("backup receipt is corrupt") from exc
+    receipt = _validate_receipt(receipt, target)
+    actual_hash = _sha256(target)
+    if actual_hash != receipt["sha256"]:
+        raise ValidationError("backup hash does not match receipt")
+    if receipt["bytes"] != target.stat().st_size:
+        raise ValidationError("backup receipt byte count is invalid")
+    inspected = _inspect_database(target)
     return {
         "status": "verified", "path": str(target), "sha256": actual_hash,
-        "integrity": integrity, "store_schema_version": str(version_row[0]),
+        **inspected,
     }
 
 
 def restore_backup(store: ImprintStore, root: Path, source: Path, *, confirmation: str) -> dict[str, Any]:
-    source = source.expanduser().resolve(strict=True)
+    source = source.expanduser()
     verify_backup(source)
+    source = source.resolve(strict=True)
     if confirmation != source.name:
         raise SafetyError("restore confirmation must exactly name the backup file")
     root = validate_data_root(root)
     secure_directory(store.path.parent)
-    safety = None
-    if store.path.exists():
-        safety = create_backup(store, root)
-        current = sqlite3.connect(store.path)
-        try:
-            current.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        finally:
-            current.close()
     fd, temporary_name = tempfile.mkstemp(prefix=".restore-", suffix=".db", dir=store.path.parent)
     os.close(fd)
     temporary = Path(temporary_name)
+    rollback: Path | None = None
+    live_existed = store.path.exists()
+    safety = None
     try:
-        origin = sqlite3.connect(source)
-        destination = sqlite3.connect(temporary)
-        try:
-            origin.backup(destination)
-        finally:
-            destination.close()
-            origin.close()
+        shutil.copyfile(source, temporary)
+        _inspect_database(temporary)
+        if live_existed and any(sidecar.exists() for sidecar in _sidecars(store.path)):
+            raise ValidationError("live database has WAL/SHM sidecars; close it before restore")
+        if live_existed:
+            safety = create_backup(store, root)
+            rollback = store.path.with_name(f".restore-rollback-{os.getpid()}-{_stamp()}.db")
+            try:
+                os.link(store.path, rollback)
+            except OSError:
+                shutil.copyfile(store.path, rollback)
         os.replace(temporary, store.path)
-        Path(str(store.path) + "-wal").unlink(missing_ok=True)
-        Path(str(store.path) + "-shm").unlink(missing_ok=True)
+        try:
+            secure_file(store.path)
+            _inspect_database(store.path)
+        except Exception:
+            if rollback is not None:
+                os.replace(rollback, store.path)
+            else:
+                store.path.unlink(missing_ok=True)
+            raise
     finally:
         temporary.unlink(missing_ok=True)
-    secure_file(store.path)
-    restored = ImprintStore(store.path)
-    if restored.integrity_check() != "ok":
-        raise ValidationError("restored database failed integrity check")
+        if rollback is not None:
+            rollback.unlink(missing_ok=True)
+        store._compatibility_verified = False
     return {
         "status": "restored",
         "source": str(source),

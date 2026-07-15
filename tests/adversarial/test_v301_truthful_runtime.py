@@ -9,7 +9,7 @@ import pytest
 from imprint.backup import create_backup
 from imprint.health import health_report
 from imprint.permissions import secure_tree
-from imprint.retrieve import DeliveryReceipts, retrieve_payload
+from imprint.retrieve import commit_payload_delivery, retrieve_payload
 from imprint.store import ImprintStore
 
 
@@ -96,28 +96,24 @@ def test_health_of_absent_store_is_degraded_without_creating_a_database(tmp_path
 
 
 def test_interrupted_delivery_replays_identical_cached_bounded_payload(
-    tmp_path, capture_envelope, monkeypatch,
+    tmp_path, capture_envelope,
 ):
     root = tmp_path / "operator"
     store = ImprintStore(root / "imprint.db")
     store.initialize()
     store.apply_capture(capture_envelope, source_path="synthetic.json")
-    original_commit = DeliveryReceipts.commit_delivery
-
-    def interrupt_after_prepare(self, session_id, snapshot_id, domain_id):
-        raise OSError("synthetic interruption after immutable response cache")
-
-    monkeypatch.setattr(DeliveryReceipts, "commit_delivery", interrupt_after_prepare)
-    with pytest.raises(OSError, match="synthetic interruption"):
-        retrieve_payload(store, root=root, session_id="crash-session", budget=32 * 1024)
+    first = retrieve_payload(store, root=root, session_id="crash-session", budget=32 * 1024)
 
     pending = next((root / "receipts").glob("*/*.pending.json"))
     expected = json.loads(pending.read_text(encoding="utf-8"))["response"]
     assert len(expected["payload"].encode("utf-8")) <= expected["budget_bytes"]
 
-    monkeypatch.setattr(DeliveryReceipts, "commit_delivery", original_commit)
     recovered = retrieve_payload(store, root=root, session_id="crash-session", budget=32 * 1024)
-    assert recovered == expected
+    assert first == recovered == expected
+    assert pending.exists(), "a pre-output crash must leave the replay cache pending"
+    assert commit_payload_delivery(
+        root=root, session_id="crash-session", snapshot_id=str(recovered["snapshot_id"]),
+    ) is True
     assert not pending.exists()
     assert retrieve_payload(
         store, root=root, session_id="crash-session", budget=32 * 1024,

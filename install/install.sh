@@ -45,7 +45,7 @@ if [ -z "${SHELL_PROFILE}" ]; then
   esac
 fi
 
-"${PYTHON}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else "Imprint requires Python 3.10+")'
+"${PYTHON}" -c 'import sys; raise SystemExit(0 if (3, 10) <= sys.version_info < (3, 14) else "Imprint requires Python 3.10-3.13")'
 case "${OPERATOR}" in *[!a-z0-9-]*|'') echo "Operator must use lowercase letters, digits, and hyphens." >&2; exit 2 ;; esac
 
 INSTALL_ROOT="$(${PYTHON} - "${INSTALL_ROOT}" <<'PY'
@@ -61,11 +61,19 @@ if [ "${INSTALL_ROOT}" = "/" ] || [ "${INSTALL_ROOT}" = "${HOME_ROOT}" ] || [ -L
 fi
 MARKER="${INSTALL_ROOT}/.imprint-install-root"
 LAUNCHER_PATH="${LAUNCHER_DIR}/imprint"
+EXISTING_VERSION=""
 if [ -d "${INSTALL_ROOT}" ] && [ -n "$(find "${INSTALL_ROOT}" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-  if [ ! -f "${MARKER}" ] || [ "$(cat "${MARKER}")" != "imprint-local:3.0.1" ]; then
+  if [ ! -f "${MARKER}" ]; then
     echo "Refusing a non-empty install root not owned by Imprint: ${INSTALL_ROOT}" >&2
     exit 2
   fi
+  case "$(cat "${MARKER}")" in
+    imprint-local:3.0.0) EXISTING_VERSION="3.0.0" ;;
+    imprint-local:3.0.1) EXISTING_VERSION="3.0.1" ;;
+    *) echo "Refusing an unsupported Imprint install version: $(cat "${MARKER}")" >&2; exit 2 ;;
+  esac
+  "${PYTHON}" "${ARTIFACT_ROOT}/tools/install/install_ownership.py" verify \
+    --root "${INSTALL_ROOT}" --expected-version "${EXISTING_VERSION}"
 fi
 
 WHEEL="$(find "${ARTIFACT_ROOT}/dist" -maxdepth 1 -type f -name 'imprint_local-3.0.1-*.whl' -print -quit)"
@@ -89,6 +97,26 @@ restore_file() {
   local destination="$1" name="$2"
   if [ -f "${STATE_ROOT}/${name}.absent" ]; then rm -f -- "${destination}"; else mkdir -p "$(dirname "${destination}")"; cp -p "${STATE_ROOT}/${name}" "${destination}"; fi
 }
+snapshot_mode() {
+  local source="$1" name="$2"
+  if [ -e "${source}" ] && [ ! -L "${source}" ]; then
+    "${PYTHON}" - "${source}" > "${STATE_ROOT}/${name}.mode" <<'PY'
+import stat, sys
+from pathlib import Path
+print(f"{stat.S_IMODE(Path(sys.argv[1]).stat().st_mode):04o}")
+PY
+  else
+    : > "${STATE_ROOT}/${name}.absent"
+  fi
+}
+restore_mode() {
+  local destination="$1" name="$2"
+  if [ -f "${STATE_ROOT}/${name}.mode" ] && [ -e "${destination}" ] && [ ! -L "${destination}" ]; then
+    chmod "$(cat "${STATE_ROOT}/${name}.mode")" "${destination}"
+  elif [ -f "${STATE_ROOT}/${name}.absent" ] && [ -d "${destination}" ] && [ ! -L "${destination}" ]; then
+    rmdir "${destination}" 2>/dev/null || true
+  fi
+}
 remove_new_root() {
   if [ -d "${INSTALL_ROOT}" ] && [ ! -L "${INSTALL_ROOT}" ]; then
     "${PYTHON}" - "${INSTALL_ROOT}" <<'PY'
@@ -110,6 +138,9 @@ rollback() {
     restore_file "${SETTINGS_PATH}" settings || true
     restore_file "${LAUNCHER_PATH}" launcher || true
     restore_file "${SHELL_PROFILE}" shell_profile || true
+    restore_mode "${CONFIG_PATH}" config_acl || true
+    restore_mode "$(dirname "${CONFIG_PATH}")" config_parent || true
+    restore_mode "${DATA_ROOT}" data_root || true
   fi
   [ -n "${STATE_ROOT}" ] && rm -rf -- "${STATE_ROOT}"
   exit "${status}"
@@ -118,9 +149,14 @@ snapshot_file "${CONFIG_PATH}" config
 snapshot_file "${SETTINGS_PATH}" settings
 snapshot_file "${LAUNCHER_PATH}" launcher
 snapshot_file "${SHELL_PROFILE}" shell_profile
+snapshot_mode "${CONFIG_PATH}" config_acl
+snapshot_mode "$(dirname "${CONFIG_PATH}")" config_parent
+snapshot_mode "${DATA_ROOT}" data_root
 trap rollback EXIT
 
-if [ -d "${INSTALL_ROOT}" ]; then mv "${INSTALL_ROOT}" "${BACKUP_ROOT}"; fi
+if [ -d "${INSTALL_ROOT}" ]; then
+  if [ -n "${EXISTING_VERSION}" ]; then mv "${INSTALL_ROOT}" "${BACKUP_ROOT}"; else rmdir "${INSTALL_ROOT}"; fi
+fi
 mkdir -p "${INSTALL_ROOT}" "$(dirname "${CONFIG_PATH}")" "${DATA_ROOT}"
 chmod 700 "$(dirname "${CONFIG_PATH}")" "${DATA_ROOT}"
 "${PYTHON}" -m venv "${INSTALL_ROOT}/venv"
@@ -191,7 +227,8 @@ IMPRINT_CONFIG="${CONFIG_PATH}" "${INSTALL_ROOT}/venv/bin/imprint" version | gre
 PATH="${LAUNCHER_DIR}:${PATH}" imprint version | grep -Fx '3.0.1' >/dev/null
 "${INSTALL_ROOT}/venv/bin/python" "${INSTALL_ROOT}/tools/install_ownership.py" record --root "${INSTALL_ROOT}"
 if [ -d "${BACKUP_ROOT}" ]; then
-  "${PYTHON}" "${INSTALL_ROOT}/tools/install_ownership.py" uninstall --root "${BACKUP_ROOT}"
+  "${PYTHON}" "${INSTALL_ROOT}/tools/install_ownership.py" uninstall --root "${BACKUP_ROOT}" \
+    --expected-version "${EXISTING_VERSION}"
 fi
 printf '%s\n' 'imprint-local:3.0.1' > "${MARKER}.tmp"
 mv "${MARKER}.tmp" "${MARKER}"

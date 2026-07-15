@@ -23,19 +23,26 @@ function Set-PrivateAcl([string]$Path) {
 }
 
 if ($Operator -notmatch '^[a-z0-9][a-z0-9-]*$') { throw "Operator must use lowercase letters, digits, and hyphens." }
-& $Python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 'Imprint requires Python 3.10+')"
-if ($LASTEXITCODE -ne 0) { throw "Python 3.10 or newer is required." }
+& $Python -c "import sys; raise SystemExit(0 if (3,10) <= sys.version_info < (3,14) else 'Imprint requires Python 3.10-3.13')"
+if ($LASTEXITCODE -ne 0) { throw "Python 3.10-3.13 is required." }
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $VolumeRoot = [IO.Path]::GetPathRoot($InstallRoot)
 if ($InstallRoot -eq $VolumeRoot -or $InstallRoot -eq [IO.Path]::GetFullPath($env:USERPROFILE)) { throw "Refusing an unsafe install root: $InstallRoot" }
 $Marker = Join-Path $InstallRoot ".imprint-install-root"
 $Launcher = Join-Path ([IO.Path]::GetFullPath($LauncherDir)) "imprint.cmd"
+$ExistingVersion = $null
 if (Test-Path $InstallRoot) {
     $item = Get-Item $InstallRoot -Force
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Refusing a reparse-point install root: $InstallRoot" }
     $children = @(Get-ChildItem $InstallRoot -Force)
-    if ($children.Count -gt 0 -and ((-not (Test-Path $Marker -PathType Leaf)) -or (Get-Content -Raw $Marker) -ne "imprint-local:3.0.1`n")) {
-        throw "Refusing a non-empty install root not owned by Imprint: $InstallRoot"
+    if ($children.Count -gt 0) {
+        if (-not (Test-Path $Marker -PathType Leaf)) { throw "Refusing a non-empty install root not owned by Imprint: $InstallRoot" }
+        $MarkerText = Get-Content -Raw $Marker
+        if ($MarkerText -eq "imprint-local:3.0.0`n") { $ExistingVersion = "3.0.0" }
+        elseif ($MarkerText -eq "imprint-local:3.0.1`n") { $ExistingVersion = "3.0.1" }
+        else { throw "Refusing an unsupported Imprint install version: $MarkerText" }
+        & $Python (Join-Path $ArtifactRoot "tools\install\install_ownership.py") verify --root $InstallRoot --expected-version $ExistingVersion
+        if ($LASTEXITCODE -ne 0) { throw "Existing installation ownership verification failed." }
     }
 }
 $Wheel = Get-ChildItem -Path (Join-Path $ArtifactRoot "dist") -Filter "imprint_local-3.0.1-*.whl" | Select-Object -First 1
@@ -53,12 +60,31 @@ function Restore-StateFile([string]$Path, [string]$Name) {
     if (Test-Path (Join-Path $StateRoot "$Name.absent")) { Remove-Item $Path -Force -ErrorAction SilentlyContinue }
     else { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null; Copy-Item -Force (Join-Path $StateRoot $Name) $Path }
 }
+function Save-PathAcl([string]$Path, [string]$Name) {
+    if (Test-Path $Path) { [IO.File]::WriteAllText((Join-Path $StateRoot "$Name.acl.sddl"), (Get-Acl -LiteralPath $Path).Sddl, [Text.Encoding]::ASCII) }
+    else { New-Item -ItemType File -Path (Join-Path $StateRoot "$Name.acl.absent") | Out-Null }
+}
+function Restore-PathAcl([string]$Path, [string]$Name) {
+    $Saved = Join-Path $StateRoot "$Name.acl.sddl"
+    if ((Test-Path $Saved -PathType Leaf) -and (Test-Path $Path)) {
+        $Acl = Get-Acl -LiteralPath $Path
+        $Acl.SetSecurityDescriptorSddlForm([IO.File]::ReadAllText($Saved, [Text.Encoding]::ASCII))
+        Set-Acl -LiteralPath $Path -AclObject $Acl
+    } elseif ((Test-Path (Join-Path $StateRoot "$Name.acl.absent") -PathType Leaf) -and (Test-Path $Path -PathType Container)) {
+        Remove-Item $Path -ErrorAction SilentlyContinue
+    }
+}
 Save-StateFile $Config "config"
 Save-StateFile $Settings "settings"
 Save-StateFile $Launcher "launcher"
+Save-PathAcl $Config "config"
+Save-PathAcl (Split-Path -Parent $Config) "config-parent"
+Save-PathAcl $DataRoot "data-root"
 $Succeeded = $false
 try {
-    if (Test-Path $InstallRoot) { Move-Item $InstallRoot $BackupRoot }
+    if (Test-Path $InstallRoot) {
+        if ($ExistingVersion) { Move-Item $InstallRoot $BackupRoot } else { Remove-Item $InstallRoot }
+    }
     New-Item -ItemType Directory -Force -Path $InstallRoot, (Split-Path -Parent $Config), $DataRoot | Out-Null
     Set-PrivateAcl (Split-Path -Parent $Config)
     Set-PrivateAcl $DataRoot
@@ -117,7 +143,7 @@ try {
     & $VenvPython $Ownership record --root $InstallRoot
     if ($LASTEXITCODE -ne 0) { throw "Unable to record installed-file ownership." }
     if (Test-Path $BackupRoot) {
-        & $VenvPython $Ownership uninstall --root $BackupRoot
+        & $VenvPython $Ownership uninstall --root $BackupRoot --expected-version $ExistingVersion
         if ($LASTEXITCODE -ne 0) { throw "Unable to remove the verified previous installation." }
     }
     [IO.File]::WriteAllText($Marker, "imprint-local:3.0.1`n", [Text.Encoding]::ASCII)
@@ -129,6 +155,9 @@ try {
     Restore-StateFile $Config "config"
     Restore-StateFile $Settings "settings"
     Restore-StateFile $Launcher "launcher"
+    Restore-PathAcl $Config "config"
+    Restore-PathAcl (Split-Path -Parent $Config) "config-parent"
+    Restore-PathAcl $DataRoot "data-root"
     throw
 } finally {
     Remove-Item $StateRoot -Recurse -Force -ErrorAction SilentlyContinue

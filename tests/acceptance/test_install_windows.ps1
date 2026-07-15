@@ -8,9 +8,12 @@ $InstallRoot = Join-Path $env:LOCALAPPDATA "Imprint App\app"
 $Config = Join-Path $env:APPDATA "Imprint\config.json"
 $Settings = Join-Path $env:USERPROFILE ".claude\settings.json"
 $Data = Join-Path $env:LOCALAPPDATA "Imprint Data"
-$Launcher = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\imprint.cmd"
-New-Item -ItemType Directory -Force -Path $env:USERPROFILE | Out-Null
+    $Launcher = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\imprint.cmd"
+    New-Item -ItemType Directory -Force -Path $env:USERPROFILE | Out-Null
 try {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config), $Data | Out-Null
+    $ConfigAclBefore = (Get-Acl (Split-Path -Parent $Config)).Sddl
+    $DataAclBefore = (Get-Acl $Data).Sddl
     $Unowned = Join-Path $env:LOCALAPPDATA "Unowned App"
     New-Item -ItemType Directory -Force -Path $Unowned | Out-Null
     Set-Content (Join-Path $Unowned "sentinel.txt") "must-survive"
@@ -26,7 +29,17 @@ try {
     Remove-Item $Wheel.FullName -Force
     Move-Item $ValidWheel $Wheel.FullName
     if (-not $failed -or (Test-Path (Join-Path $InstallRoot ".imprint-install-root"))) { throw "Failed install left an ownership marker." }
+    if ((Get-Acl (Split-Path -Parent $Config)).Sddl -ne $ConfigAclBefore -or (Get-Acl $Data).Sddl -ne $DataAclBefore) { throw "Failed install did not restore external ACLs." }
+    New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+    Set-Content -Encoding ascii (Join-Path $InstallRoot "legacy-owned.txt") "legacy"
+    & python (Join-Path $ArtifactRoot "tools\install\install_ownership.py") record --root $InstallRoot
+    $LegacyManifest = Join-Path $InstallRoot ".imprint-owned-files.json"
+    $LegacyValue = Get-Content -Raw $LegacyManifest | ConvertFrom-Json -AsHashtable
+    $LegacyValue["version"] = "3.0.0"
+    $LegacyValue | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 $LegacyManifest
+    [IO.File]::WriteAllText((Join-Path $InstallRoot ".imprint-install-root"), "imprint-local:3.0.0`n", [Text.Encoding]::ASCII)
     & (Join-Path $ArtifactRoot "install\install.ps1") -InstallRoot $InstallRoot -Config $Config -Settings $Settings -DataRoot $Data
+    if (Test-Path (Join-Path $InstallRoot "legacy-owned.txt")) { throw "3.0.0 owned application survived upgrade." }
     & (Join-Path $ArtifactRoot "install\install.ps1") -InstallRoot $InstallRoot -Config $Config -Settings $Settings -DataRoot $Data
     $Version = & $Launcher version
     if ($LASTEXITCODE -ne 0 -or $Version -ne "3.0.1") { throw "Owned launcher was not callable." }

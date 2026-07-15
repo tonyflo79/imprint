@@ -136,6 +136,49 @@ def test_huge_transcript_preserves_feedback_with_bounded_hashed_evidence(tmp_pat
     assert extension["truncated"] is True
 
 
+def test_huge_transcript_fails_closed_on_malformed_complete_tail_line(tmp_path):
+    config, data = _config(tmp_path, compiler=True)
+    transcript = tmp_path / "malformed-huge.jsonl"
+    user = json.dumps({
+        "type": "user",
+        "message": {"role": "user", "content": "No, preserve the correction because it matters."},
+    })
+    tail = ("\n{malformed complete json}\n" + user + "\n").encode()
+    with transcript.open("wb") as handle:
+        handle.seek((17 * 1024 * 1024) - len(tail))
+        handle.write(tail)
+
+    result = _hook(config, "stop-capture", {
+        "hook_event_name": "Stop", "session_id": "malformed-tail",
+        "transcript_path": str(transcript),
+    })
+    assert result.returncode == 2
+    assert "malformed complete transcript line" in result.stdout
+    assert not list((data / "test" / "spool").glob("*/*.json"))
+
+
+def test_stop_never_claims_compiled_without_exact_durable_ack(
+    tmp_path, monkeypatch, capsys,
+):
+    import imprint.cli as cli
+    import imprint.compiler as compiler
+
+    config, _ = _config(tmp_path, compiler=True)
+    monkeypatch.setattr(cli, "compile_spools", lambda *args, **kwargs: {
+        "captured": 1, "duplicate": 0, "quarantined": 0,
+    })
+    monkeypatch.setattr(compiler, "acknowledgement_committed", lambda *args: False)
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(json.dumps({
+        "session_id": "missing-ack",
+        "operator_text": "No, preserve exact commit proof because false success is corrupting.",
+    })))
+
+    assert cli.main(["--config", str(config), "hook", "stop-capture"]) == 2
+    body = json.loads(capsys.readouterr().out)
+    assert body["status"] == "error"
+    assert "acknowledgement" in body["error"]
+
+
 def _bridge_module():
     spec = importlib.util.spec_from_file_location("imprint_test_bridge", ROOT / "hooks" / "_bridge.py")
     assert spec and spec.loader
@@ -190,3 +233,66 @@ def test_missing_hook_executable_uses_declared_policy(monkeypatch, capsys, actio
     monkeypatch.setattr(bridge.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("missing")))
     assert bridge.run(action) == expected
     assert json.loads(capsys.readouterr().out)["error"] == "hook_executable_unavailable"
+
+
+def test_bridge_flushes_payload_before_delivery_commit(monkeypatch):
+    bridge = _bridge_module()
+
+    class FlushedOutput(io.StringIO):
+        flushed = False
+
+        def flush(self):
+            self.flushed = True
+            return super().flush()
+
+    output = FlushedOutput()
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            body = {
+                "hook_schema_version": "1.0.0", "status": "delivered",
+                "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "payload"},
+                "_imprint_delivery": {"session_id": "opaque", "snapshot_id": "snapshot", "domain_id": None},
+            }
+            return subprocess.CompletedProcess(command, 0, json.dumps(body), "")
+        assert output.flushed is True
+        assert command[-1] == "delivery-commit"
+        return subprocess.CompletedProcess(command, 0, '{"status":"committed"}\n', "")
+
+    monkeypatch.setattr(bridge.sys, "stdin", io.StringIO("{}"))
+    monkeypatch.setattr(bridge.sys, "stdout", output)
+    monkeypatch.setattr(bridge.subprocess, "run", run)
+    assert bridge.run("session-start") == 0
+    assert len(calls) == 2
+    visible = json.loads(output.getvalue())
+    assert visible["hookSpecificOutput"]["additionalContext"] == "payload"
+    assert "_imprint_delivery" not in visible
+
+
+def test_real_bridge_commits_only_after_visible_delivery(tmp_path):
+    config, _ = _config(tmp_path, compiler=True)
+    seeded = _hook(config, "stop-capture", {
+        "session_id": "seed",
+        "operator_text": "No, preserve the failed source because it changes the decision.",
+    })
+    assert seeded.returncode == 0, seeded.stdout + seeded.stderr
+    env = dict(os.environ, IMPRINT_CONFIG=str(config))
+    event = json.dumps({"hook_event_name": "SessionStart", "session_id": "bridge-session"})
+
+    first = subprocess.run(
+        [sys.executable, str(ROOT / "hooks" / "session_start.py")],
+        input=event, text=True, capture_output=True, env=env, check=False,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    first_body = json.loads(first.stdout)
+    assert first_body["status"] == "delivered"
+    assert first_body["hookSpecificOutput"]["additionalContext"]
+
+    second = subprocess.run(
+        [sys.executable, str(ROOT / "hooks" / "session_start.py")],
+        input=event, text=True, capture_output=True, env=env, check=False,
+    )
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert json.loads(second.stdout)["status"] == "already_delivered"

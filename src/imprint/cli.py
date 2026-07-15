@@ -27,6 +27,28 @@ def _store(root: Path) -> ImprintStore:
 
 def _write_json(value) -> None:
     print(json.dumps(value, sort_keys=True, ensure_ascii=False))
+    sys.stdout.flush()
+
+
+def _emit_retrieval_json(value: dict, *, root: Path, session_id: str,
+                         snapshot_id: str, domain_id: str | None) -> None:
+    """Flush payload at the outermost available boundary before committing it."""
+    from .retrieve import commit_payload_delivery
+
+    deferred = os.environ.get("IMPRINT_DEFER_DELIVERY_COMMIT") == "1"
+    if deferred:
+        value = dict(value)
+        value["_imprint_delivery"] = {
+            "session_id": session_id,
+            "snapshot_id": snapshot_id,
+            "domain_id": domain_id,
+        }
+    _write_json(value)
+    if not deferred:
+        commit_payload_delivery(
+            root=root, session_id=session_id, snapshot_id=snapshot_id,
+            domain_id=domain_id,
+        )
 
 
 def _validate_hook_event(event: dict, expected: str) -> None:
@@ -151,15 +173,23 @@ def _parse_large_native_transcript(path_value: str) -> dict:
         newline = tail.find(b"\n")
         tail = tail[newline + 1:] if newline >= 0 else b""
     try:
-        lines = tail.decode("utf-8").splitlines()
+        decoded_lines = tail.decode("utf-8").splitlines(keepends=True)
     except UnicodeDecodeError as exc:
         raise ValidationError("transcript tail is not valid UTF-8") from exc
     messages: list[tuple[str, str]] = []
-    for number, raw in enumerate(lines, start=1):
+    for number, raw_line in enumerate(decoded_lines, start=1):
+        complete = raw_line.endswith(("\n", "\r"))
+        raw = raw_line.rstrip("\r\n")
+        if not raw.strip():
+            continue
         try:
             item = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            if not complete and number == len(decoded_lines):
+                # A writer may be interrupted mid-record at EOF. Ignore only
+                # that unambiguously incomplete final fragment.
+                continue
+            raise ValidationError(f"malformed complete transcript line {number}") from exc
         if not isinstance(item, dict) or item.get("type") not in {"user", "assistant"}:
             continue
         message = item.get("message")
@@ -410,6 +440,8 @@ def build_parser() -> argparse.ArgumentParser:
     hook = subs.add_parser("hook", help="execute one portable hook action")
     hook.add_argument("action", choices=("session-start", "user-prompt-submit", "stop-capture", "health-check"))
 
+    subs.add_parser("delivery-commit", help=argparse.SUPPRESS)
+
     subs.add_parser("health", help="report content-free health as JSON")
     subs.add_parser("version", help="print version")
     return parser
@@ -428,6 +460,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         store.expected_operator_id = _operator_urn(root)
         store.expected_node_id = str(config.get("node_id", "primary"))
+        if args.command == "delivery-commit":
+            from .retrieve import commit_payload_delivery
+            receipt = json.load(sys.stdin)
+            if not isinstance(receipt, dict) or set(receipt) != {"session_id", "snapshot_id", "domain_id"}:
+                raise ValidationError("delivery commit receipt is invalid")
+            if not isinstance(receipt["session_id"], str) or not isinstance(receipt["snapshot_id"], str):
+                raise ValidationError("delivery commit identity is invalid")
+            if receipt["domain_id"] is not None and not isinstance(receipt["domain_id"], str):
+                raise ValidationError("delivery commit domain is invalid")
+            committed = commit_payload_delivery(root=root, **receipt)
+            _write_json({"status": "committed" if committed else "already_committed"})
+            return 0
         if args.command == "capture":
             envelope = json.loads(args.event.read_text())
             if envelope.get("operator_id") != store.expected_operator_id or envelope.get("node_id") != store.expected_node_id:
@@ -773,7 +817,13 @@ def main(argv: list[str] | None = None) -> int:
                 budget=int(config["context_budget_bytes"]),
                 refresh=args.refresh,
             )
-            _write_json(result)
+            if not args.refresh and result.get("status") == "delivered":
+                _emit_retrieval_json(
+                    result, root=root, session_id=args.session,
+                    snapshot_id=str(result["snapshot_id"]), domain_id=None,
+                )
+            else:
+                _write_json(result)
             return 0
         if args.command == "health":
             from .health import health_report
@@ -795,14 +845,21 @@ def main(argv: list[str] | None = None) -> int:
                 from .retrieve import retrieve_payload
                 store.initialize()
                 result = retrieve_payload(store, root=root, session_id=session, prompt="", budget=int(config["context_budget_bytes"]))
-                _write_json({
+                response = {
                     "hook_schema_version": "1.0.0",
                     "status": result["status"],
                     "hookSpecificOutput": {
                         "hookEventName": "SessionStart",
                         "additionalContext": result.get("payload", ""),
                     },
-                })
+                }
+                if result.get("status") == "delivered":
+                    _emit_retrieval_json(
+                        response, root=root, session_id=session,
+                        snapshot_id=str(result["snapshot_id"]), domain_id=None,
+                    )
+                else:
+                    _write_json(response)
                 return 0
             if args.action == "user-prompt-submit":
                 _validate_hook_event(event, "UserPromptSubmit")
@@ -828,7 +885,7 @@ def main(argv: list[str] | None = None) -> int:
                     prompt=prompt, explicit_domain=domain,
                     budget=int(config["context_budget_bytes"]), domain_only=True,
                 )
-                _write_json({
+                response = {
                     "hook_schema_version": "1.0.0",
                     "status": result["status"],
                     "domain_id": domain,
@@ -837,7 +894,14 @@ def main(argv: list[str] | None = None) -> int:
                         "hookEventName": "UserPromptSubmit",
                         "additionalContext": result.get("payload", ""),
                     },
-                })
+                }
+                if result.get("status") == "delivered":
+                    _emit_retrieval_json(
+                        response, root=root, session_id=session,
+                        snapshot_id=str(result["snapshot_id"]), domain_id=domain,
+                    )
+                else:
+                    _write_json(response)
                 return 0
             if args.action == "stop-capture":
                 _validate_hook_event(event, "Stop")
@@ -891,9 +955,12 @@ def main(argv: list[str] | None = None) -> int:
                     "canonical_status": "spool_only",
                 }
                 if bool(config.get("compiler")):
+                    from .compiler import acknowledgement_committed
                     counts = compile_spools(
                         root, store, compiler_authorized=True,
                     )
+                    if counts["quarantined"] or not acknowledgement_committed(root, path, envelope):
+                        raise ImprintError("Stop capture lacks exact durable canonical acknowledgement")
                     receipt["canonical_status"] = "compiled"
                     receipt["compile"] = counts
                 if extensions:

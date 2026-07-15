@@ -8,9 +8,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from imprint.compiler.spool import compiler_lock_state
+from imprint.capture.schema import build_capture_envelope, new_urn
+from imprint.compiler import compile_spools, write_envelope
+from imprint.compiler.spool import (
+    INVALID_LOCK_CONFIRMATION, compiler_lock_state, recover_stale_compiler_lock,
+)
 from imprint.config import load_config
-from imprint.errors import ValidationError
+from imprint.errors import SafetyError, ValidationError
 from imprint.store import ImprintStore
 
 
@@ -80,6 +84,60 @@ def test_stale_heartbeat_requires_dead_local_pid(tmp_path):
     )))
     state = compiler_lock_state(tmp_path)
     assert state["stale"] is True and state["pid_alive"] is False
+
+
+def test_invalid_empty_lock_requires_explicit_recovery_phrase(tmp_path):
+    lock = tmp_path / "compiler.lock"
+    lock.mkdir()
+    with pytest.raises(SafetyError, match="RECOVER-INVALID-LOCK"):
+        recover_stale_compiler_lock(tmp_path, confirmation="anything")
+    result = recover_stale_compiler_lock(
+        tmp_path, confirmation=INVALID_LOCK_CONFIRMATION,
+    )
+    assert result["recovery_mode"] == "invalid-explicit"
+    assert not lock.exists()
+
+
+def test_stale_lock_recovery_removes_only_owned_heartbeat_residue(tmp_path):
+    lock = tmp_path / "compiler.lock"
+    lock.mkdir()
+    old = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    owner = _owner(pid=99999999, host=socket.gethostname(), created_at=old, heartbeat_at=old)
+    (lock / "owner.json").write_text(json.dumps(owner))
+    (lock / f".owner-{owner['nonce']}.tmp").write_text("legacy-partial")
+    (lock / f".owner-{owner['nonce']}-crash.tmp").write_text("partial")
+    assert recover_stale_compiler_lock(tmp_path, confirmation=owner["nonce"])["status"] == "recovered"
+    assert not lock.exists()
+
+
+def test_stale_lock_recovery_refuses_unowned_residue(tmp_path):
+    lock = tmp_path / "compiler.lock"
+    lock.mkdir()
+    (lock / "unowned.txt").write_text("preserve")
+    with pytest.raises(SafetyError, match="unowned residue"):
+        recover_stale_compiler_lock(tmp_path, confirmation=INVALID_LOCK_CONFIRMATION)
+    assert (lock / "unowned.txt").read_text() == "preserve"
+
+
+def test_compiler_propagates_infrastructure_failure_instead_of_quarantine(tmp_path):
+    envelope = build_capture_envelope(
+        operator_id=new_urn("operator"), session_id=new_urn("session"),
+        node_id="primary", case_description="failure boundary",
+        raw_operator_text="No, preserve the failure because it changes the conclusion.",
+        call_type="correct", capture_mechanism="explicit_cli", captured_by="audit",
+    )
+    write_envelope(tmp_path, envelope)
+
+    class BrokenStore:
+        def initialize(self):
+            return None
+
+        def apply_capture(self, *args, **kwargs):
+            raise OSError("disk I/O error")
+
+    with pytest.raises(OSError, match="disk I/O"):
+        compile_spools(tmp_path, BrokenStore(), compiler_authorized=True)
+    assert not (tmp_path / "quarantine").exists()
 
 
 def _make_store(path, version: str | None) -> None:

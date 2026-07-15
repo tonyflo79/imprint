@@ -12,13 +12,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from imprint.errors import ConflictError, SafetyError
+from imprint.errors import ConflictError, SafetyError, ValidationError
 from imprint.capture.schema import validate_capture_envelope
 from imprint.ontology.schema import canonical_bytes, payload_sha256
 from imprint.permissions import secure_directory, secure_file, secure_tree
 from imprint.store import ImprintStore
 
 LOCK_STALE_SECONDS = 300
+INVALID_LOCK_CONFIRMATION = "RECOVER-INVALID-LOCK"
 
 
 def _now() -> str:
@@ -30,13 +31,17 @@ def _lock_owner_path(operator_root: Path) -> Path:
 
 
 def _write_lock_owner(path: Path, owner: dict[str, Any]) -> None:
-    temporary = path.with_name(f".owner-{owner['nonce']}.tmp")
     data = json.dumps(owner, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
-    with temporary.open("xb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".owner-{owner['nonce']}-", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     secure_file(path)
 
 
@@ -97,20 +102,96 @@ def compiler_lock_state(operator_root: Path) -> dict[str, Any]:
 
 
 def recover_stale_compiler_lock(operator_root: Path, *, confirmation: str) -> dict[str, Any]:
-    """Manually recover a stale lease using its exact opaque nonce."""
+    """Atomically claim and remove only a stale, Imprint-owned lease directory."""
     root = Path(operator_root)
+    lock = root / "compiler.lock"
+    if lock.is_symlink() or (lock.exists() and not lock.is_dir()):
+        raise SafetyError("compiler lock must be a real directory")
     state = compiler_lock_state(root)
     if state.get("state") == "absent":
         return {"status": "absent"}
     if not state.get("stale"):
         raise SafetyError("compiler lock is not stale; recovery refused")
     nonce = state.get("nonce")
-    if not nonce or confirmation != nonce:
-        raise SafetyError("stale lock recovery requires the exact owner nonce")
-    owner_path = _lock_owner_path(root)
-    owner_path.unlink()
-    (root / "compiler.lock").rmdir()
-    return {"status": "recovered", "nonce": nonce}
+    required = nonce if nonce else INVALID_LOCK_CONFIRMATION
+    if confirmation != required:
+        label = "exact owner nonce" if nonce else INVALID_LOCK_CONFIRMATION
+        raise SafetyError(f"stale lock recovery requires {label}")
+
+    try:
+        before = lock.stat(follow_symlinks=False)
+        owner_before = (lock / "owner.json").read_bytes() if (lock / "owner.json").is_file() else None
+        names = {item.name for item in lock.iterdir()}
+    except OSError as exc:
+        raise SafetyError("compiler lock changed during recovery inspection") from exc
+    def owned_temporary(name: str) -> bool:
+        if not name.endswith(".tmp"):
+            return False
+        if nonce:
+            return name == f".owner-{nonce}.tmp" or name.startswith(f".owner-{nonce}-")
+        prefix = name.removeprefix(".owner-").split("-", 1)[0]
+        return len(prefix) == 32 and all(character in "0123456789abcdef" for character in prefix)
+
+    allowed = {"owner.json"}
+    allowed.update(name for name in names if owned_temporary(name))
+    if names - allowed:
+        raise SafetyError("compiler lock contains unowned residue; recovery refused")
+
+    claimed = root / f".compiler-lock-recovery-{uuid.uuid4().hex}"
+    try:
+        os.replace(lock, claimed)
+    except OSError as exc:
+        raise SafetyError("compiler lock changed before recovery claim") from exc
+    try:
+        after = claimed.stat(follow_symlinks=False)
+        owner_after = (claimed / "owner.json").read_bytes() if (claimed / "owner.json").is_file() else None
+        if (before.st_dev, before.st_ino, owner_before) != (after.st_dev, after.st_ino, owner_after):
+            raise SafetyError("compiler lock changed during recovery claim")
+        for item in tuple(claimed.iterdir()):
+            if item.name == "owner.json" or owned_temporary(item.name):
+                if item.is_symlink() or not item.is_file():
+                    raise SafetyError("compiler lock residue is not a regular file")
+                item.unlink()
+            else:
+                raise SafetyError("compiler lock contains unowned residue; recovery refused")
+        claimed.rmdir()
+    except Exception:
+        if claimed.exists() and not lock.exists():
+            try:
+                os.replace(claimed, lock)
+            except OSError:
+                pass
+        raise
+    if nonce:
+        return {"status": "recovered", "nonce": nonce}
+    return {"status": "recovered", "nonce": None, "recovery_mode": "invalid-explicit"}
+
+
+def acknowledgement_committed(operator_root: Path, path: Path, envelope: dict[str, Any]) -> bool:
+    """Verify exact durable commit evidence for one queued spool envelope."""
+    target = _ack_path(Path(operator_root), envelope)
+    try:
+        if target.is_symlink() or not target.is_file():
+            return False
+        ack = json.loads(target.read_text(encoding="ascii"))
+        required = {
+            "ack_schema_version", "input_event_id", "node_id", "payload_sha256",
+            "source_file_sha256", "source_path", "committed", "compiler_result",
+            "acknowledged_at",
+        }
+        return (
+            set(ack) == required
+            and ack["ack_schema_version"] == "1.0.0"
+            and ack["committed"] is True
+            and ack["input_event_id"] == envelope["input_event_id"]
+            and ack["node_id"] == envelope["node_id"]
+            and ack["payload_sha256"] == payload_sha256(envelope)
+            and ack["source_file_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+            and ack["source_path"] == path.relative_to(operator_root).as_posix()
+            and ack["compiler_result"] in {"captured", "duplicate"}
+        )
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return False
 
 
 def _quarantine_receipt(operator_root: Path, path: Path, error: Exception) -> None:
@@ -306,11 +387,14 @@ def compile_spools(operator_root: Path, store: ImprintStore, *, compiler_authori
         for _, _, path, envelope in sorted(inputs):
             try:
                 result = store.apply_capture(envelope, source_path=path.relative_to(operator_root).as_posix())
-                _write_acknowledgement(operator_root, path, envelope, result)
-                counts[result] += 1
-            except Exception as exc:
+            except (ValidationError, ConflictError) as exc:
                 _quarantine_receipt(operator_root, path, exc)
                 counts["quarantined"] += 1
+            else:
+                # Acknowledgement failures are infrastructure failures. They must
+                # propagate so callers never claim canonical success without proof.
+                _write_acknowledgement(operator_root, path, envelope, result)
+                counts[result] += 1
             owner["heartbeat_at"] = _now()
             _write_lock_owner(_lock_owner_path(operator_root), owner)
         return counts
