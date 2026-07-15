@@ -17,13 +17,13 @@ from imprint.capture.schema import validate_capture_envelope
 from imprint.ontology.contracts import validate_node_contract, validate_relation_contract
 from imprint.ontology.references import validate_payload_references
 from imprint.ontology.schema import canonical_bytes, make_urn, payload_sha256, require_urn
+from imprint.permissions import secure_directory, secure_file
 from .schema import SCHEMA_SQL
 
 
 DERIVED_NODE_TYPES = frozenset({
     "Principle", "Belief", "Value", "Rule", "Pattern", "Domain", "FeedbackProfile", "Proposal",
 })
-
 
 def version_provenance(*, status: str, authority_tier: str, actor_class: str,
                        actor_id: str, mechanism: str, event_id: str,
@@ -51,26 +51,74 @@ class ImprintStore:
         self.path = Path(path)
         self.expected_operator_id = expected_operator_id
         self.expected_node_id = expected_node_id
+        self._compatibility_verified = False
 
     def _require_configured_operator(self, operator_id: str) -> None:
         if self.expected_operator_id is not None and operator_id != self.expected_operator_id:
             raise ValidationError("operator does not match configured identity")
 
     def initialize(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as conn:
-            conn.executescript(SCHEMA_SQL)
-            conn.execute(
-                "INSERT OR IGNORE INTO meta(key,value) VALUES('store_schema_version',?)",
-                (STORE_SCHEMA_VERSION,),
-            )
-            conn.execute(
-                "INSERT OR IGNORE INTO meta(key,value) VALUES('ontology_schema_version',?)",
-                (ONTOLOGY_SCHEMA_VERSION,),
-            )
+        if self.path.exists():
+            self._require_existing_store_compatible()
+        secure_directory(self.path.parent)
+        self._compatibility_verified = True
+        try:
+            with self.connect() as conn:
+                conn.executescript(SCHEMA_SQL)
+                conn.execute(
+                    "INSERT OR IGNORE INTO meta(key,value) VALUES('store_schema_version',?)",
+                    (STORE_SCHEMA_VERSION,),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO meta(key,value) VALUES('ontology_schema_version',?)",
+                    (ONTOLOGY_SCHEMA_VERSION,),
+                )
+        except Exception:
+            self._compatibility_verified = False
+            raise
+
+    def _require_existing_store_compatible(self) -> None:
+        """Inspect an existing database without permitting SQLite side effects."""
+        try:
+            resolved = self.path.resolve(strict=True)
+            if not resolved.is_file() or self.path.is_symlink():
+                raise ValidationError("store path must be a regular non-symlink file")
+            uri = f"{resolved.as_uri()}?mode=ro&immutable=1"
+            conn = sqlite3.connect(uri, uri=True, timeout=5)
+            try:
+                table = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+                ).fetchone()
+                if table is None:
+                    raise ValidationError("existing store is missing schema metadata")
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key='store_schema_version'"
+                ).fetchone()
+                if row is None:
+                    raise ValidationError("existing store is missing store_schema_version")
+                if not isinstance(row[0], str) or row[0] != STORE_SCHEMA_VERSION:
+                    raise ValidationError(
+                        f"incompatible store schema {row[0]!r}; expected {STORE_SCHEMA_VERSION}"
+                    )
+                ontology = conn.execute(
+                    "SELECT value FROM meta WHERE key='ontology_schema_version'"
+                ).fetchone()
+                if ontology is None:
+                    raise ValidationError("existing store is missing ontology_schema_version")
+            finally:
+                conn.close()
+        except ValidationError:
+            raise
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise ValidationError("existing store is corrupt or unreadable") from exc
 
     @contextmanager
     def connect(self):
+        if not self._compatibility_verified:
+            if not self.path.exists():
+                raise ValidationError("store must be initialized before use")
+            self._require_existing_store_compatible()
+            self._compatibility_verified = True
         conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
@@ -82,6 +130,8 @@ class ImprintStore:
             raise
         finally:
             conn.close()
+            if self.path.exists():
+                secure_file(self.path)
 
     def integrity_check(self) -> str:
         with self.connect() as conn:

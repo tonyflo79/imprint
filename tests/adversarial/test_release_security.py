@@ -26,7 +26,7 @@ def test_zip_symlink_is_rejected_by_verifier_and_extractor(tmp_path: Path) -> No
     extractor = load("extract_safe_for_zip", "tools/release/extract_safe.py")
     archive = tmp_path / "hostile.zip"
     with zipfile.ZipFile(archive, "w") as output:
-        item = zipfile.ZipInfo("imprint-3.0.0/link")
+        item = zipfile.ZipInfo("imprint-3.0.1/link")
         item.create_system = 3
         item.external_attr = (stat.S_IFLNK | 0o777) << 16
         output.writestr(item, "../../outside")
@@ -41,7 +41,7 @@ def test_tar_link_and_traversal_are_rejected(tmp_path: Path) -> None:
     extractor = load("extract_safe_for_tar", "tools/release/extract_safe.py")
     link_archive = tmp_path / "link.tar.gz"
     with tarfile.open(link_archive, "w:gz") as output:
-        item = tarfile.TarInfo("imprint-3.0.0/link")
+        item = tarfile.TarInfo("imprint-3.0.1/link")
         item.type = tarfile.SYMTYPE
         item.linkname = "../../outside"
         output.addfile(item)
@@ -66,7 +66,7 @@ def test_ownership_manifest_refuses_unknown_or_mutated_files(tmp_path: Path) -> 
     owned = root / "owned.txt"
     owned.write_text("original", encoding="utf-8")
     ownership.record(root)
-    (root / ownership.MARKER).write_text("imprint-local:3.0.0\n", encoding="ascii")
+    (root / ownership.MARKER).write_text("imprint-local:3.0.1\n", encoding="ascii")
     unknown = root / "unknown.txt"
     unknown.write_text("leave me", encoding="utf-8")
     with pytest.raises(SystemExit, match="unowned paths"):

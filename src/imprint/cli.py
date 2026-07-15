@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
+import secrets
 import sys
 import tempfile
 import uuid
@@ -14,6 +17,7 @@ from .compiler import compile_spools, write_envelope
 from .config import load_config, resolved_operator_root
 from .errors import ImprintError, ValidationError
 from .projections import markdown_document
+from .permissions import secure_directory, secure_file, secure_tree
 from .store import ImprintStore
 
 
@@ -45,7 +49,7 @@ def _operator_urn(root: Path) -> str:
         if isinstance(value, dict) and str(value.get("operator_id", "")).startswith("urn:imprint:operator:"):
             return str(value["operator_id"])
         raise ImprintError("operator identity is corrupt")
-    root.mkdir(parents=True, exist_ok=True)
+    secure_directory(root)
     operator_id = f"urn:imprint:operator:{uuid.uuid4()}"
     fd, temporary = tempfile.mkstemp(prefix=".identity-", dir=root)
     try:
@@ -65,6 +69,137 @@ def _operator_urn(root: Path) -> str:
     finally:
         Path(temporary).unlink(missing_ok=True)
     return operator_id
+
+
+def _session_key(root: Path) -> bytes:
+    """Return an installation-local key without persisting provider session IDs."""
+    target = root / "session-map.key"
+    if target.exists():
+        try:
+            encoded = target.read_text(encoding="ascii").strip()
+            key = bytes.fromhex(encoded)
+        except (OSError, ValueError) as exc:
+            raise ImprintError("session mapping key is corrupt") from exc
+        if len(key) != 32:
+            raise ImprintError("session mapping key is corrupt")
+        return key
+    secure_directory(root)
+    encoded = secrets.token_hex(32)
+    fd, temporary = tempfile.mkstemp(prefix=".session-map-", dir=root)
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(encoded + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        try:
+            os.link(temporary, target)
+        except FileExistsError:
+            return _session_key(root)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    return bytes.fromhex(encoded)
+
+
+def _opaque_session_urn(root: Path, native_session_id: str) -> str:
+    """Map a native session to a stable opaque UUID without storing the input."""
+    digest = hmac.new(
+        _session_key(root), native_session_id.encode("utf-8"), hashlib.sha256,
+    ).digest()
+    mapped = uuid.UUID(bytes=digest[:16], version=4)
+    return f"urn:imprint:session:{mapped}"
+
+
+def _message_text(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(
+            item["text"] for item in value
+            if isinstance(item, dict) and item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+        )
+    return ""
+
+
+def _truncate_utf8(value: str, byte_limit: int) -> tuple[str, bool]:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= byte_limit:
+        return value, False
+    return encoded[:byte_limit].decode("utf-8", errors="ignore"), True
+
+
+def _parse_large_native_transcript(path_value: str) -> dict:
+    """Recover final feedback from a huge transcript using a bounded tail read."""
+    from .errors import ValidationError
+
+    path = Path(path_value).expanduser()
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise ValidationError("transcript_path must be an absolute regular non-symlink file")
+    size = path.stat().st_size
+    if size <= 0:
+        raise ValidationError("transcript_path is empty")
+    tail_limit = 2 * 1024 * 1024
+    with path.open("rb") as handle:
+        offset = max(0, size - tail_limit)
+        handle.seek(offset)
+        tail = handle.read(tail_limit)
+    if offset:
+        newline = tail.find(b"\n")
+        tail = tail[newline + 1:] if newline >= 0 else b""
+    try:
+        lines = tail.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValidationError("transcript tail is not valid UTF-8") from exc
+    messages: list[tuple[str, str]] = []
+    for number, raw in enumerate(lines, start=1):
+        try:
+            item = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(item, dict) or item.get("type") not in {"user", "assistant"}:
+            continue
+        message = item.get("message")
+        if not isinstance(message, dict):
+            continue
+        text = _message_text(message.get("content"))
+        if text.strip():
+            messages.append((item["type"], text))
+    user_indexes = [index for index, (kind, _) in enumerate(messages) if kind == "user"]
+    if not user_indexes:
+        raise ValidationError("bounded transcript tail contains no user message")
+    user_index = user_indexes[-1]
+    operator_text = messages[user_index][1]
+    prior_assistant = next(
+        (messages[index][1] for index in range(user_index - 1, -1, -1)
+         if messages[index][0] == "assistant"),
+        None,
+    )
+    context_truncated = False
+    if prior_assistant is not None:
+        prior_assistant, context_truncated = _truncate_utf8(prior_assistant, 64 * 1024)
+    evidence_sha256 = hashlib.sha256(tail).hexdigest()
+    return {
+        "operator_text": operator_text,
+        "prior_assistant_output": prior_assistant,
+        "case_description": "Explicit operator feedback witnessed in a bounded Claude Code transcript tail",
+        "source_locator": f"transcript-tail:sha256:{evidence_sha256}",
+        "degradation": {
+            "schema_version": "1.0.0",
+            "payload": {
+                "transcript_bytes": size,
+                "tail_bytes_examined": len(tail),
+                "evidence_sha256": evidence_sha256,
+                "hash_scope": "bounded_tail",
+                "truncated": True,
+                "context_truncated": context_truncated or offset > 0,
+                "receipt": "huge_transcript_bounded_tail",
+            },
+        },
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -340,8 +475,15 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 content = markdown_document(snapshot)
             if args.output:
-                args.output.parent.mkdir(parents=True, exist_ok=True)
+                if args.output.parent.exists():
+                    if args.output.parent.is_symlink() or not args.output.parent.is_dir():
+                        raise ValidationError("export parent must be a regular directory")
+                else:
+                    secure_directory(args.output.parent)
                 args.output.write_text(content)
+                secure_file(args.output)
+                if root.exists():
+                    secure_tree(root)
                 _write_json({"status": "exported", "path": str(args.output)})
             else:
                 print(content, end="")
@@ -642,7 +784,12 @@ def main(argv: list[str] | None = None) -> int:
             event = json.load(sys.stdin)
             if not isinstance(event, dict):
                 raise ImprintError("hook event must be an object")
-            session = str(event.get("session_id") or event.get("sessionId") or "unknown-session")
+            native_value = event.get("session_id") or event.get("sessionId")
+            native_session = (
+                str(native_value) if native_value
+                else f"unavailable-event:{uuid.uuid4()}"
+            )
+            session = _opaque_session_urn(root, native_session)
             if args.action == "session-start":
                 _validate_hook_event(event, "SessionStart")
                 from .retrieve import retrieve_payload
@@ -700,8 +847,14 @@ def main(argv: list[str] | None = None) -> int:
                 prior_assistant = event.get("prior_assistant_output")
                 case_description = event.get("case_description")
                 contextual_evidence = []
+                extensions = {}
                 if not operator_text and isinstance(event.get("transcript_path"), str):
-                    native = parse_native_stop_transcript(event["transcript_path"])
+                    transcript = Path(event["transcript_path"]).expanduser()
+                    if transcript.is_file() and transcript.stat().st_size > 16 * 1024 * 1024:
+                        native = _parse_large_native_transcript(event["transcript_path"])
+                        extensions["org.imprint.transcript"] = native["degradation"]
+                    else:
+                        native = parse_native_stop_transcript(event["transcript_path"])
                     operator_text = native["operator_text"]
                     prior_assistant = native["prior_assistant_output"]
                     case_description = native["case_description"]
@@ -721,18 +874,31 @@ def main(argv: list[str] | None = None) -> int:
                 if not detection.is_feedback:
                     _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "not_explicit_feedback"})
                     return 0
-                session_urn = f"urn:imprint:session:{uuid.uuid4()}"
                 envelope = build_capture_envelope(
-                    operator_id=_operator_urn(root), session_id=session_urn,
+                    operator_id=_operator_urn(root), session_id=session,
                     node_id=str(config.get("node_id", "primary")),
                     case_description=str(case_description or "Explicit operator feedback witnessed by explicit hook input"),
                     raw_operator_text=operator_text, call_type=detection.call_type,
                     capture_mechanism="claude_code_stop_hook", captured_by="imprint-hook",
                     reason=event.get("reason") if isinstance(event.get("reason"), str) else None,
                     contextual_evidence=contextual_evidence,
+                    extensions=extensions,
                 )
                 path = write_envelope(root, envelope)
-                _write_json({"hook_schema_version": "1.0.0", "status": "queued", "event_id": envelope["input_event_id"], "spool_file": path.name})
+                receipt = {
+                    "hook_schema_version": "1.0.0", "status": "queued",
+                    "event_id": envelope["input_event_id"], "spool_file": path.name,
+                    "canonical_status": "spool_only",
+                }
+                if bool(config.get("compiler")):
+                    counts = compile_spools(
+                        root, store, compiler_authorized=True,
+                    )
+                    receipt["canonical_status"] = "compiled"
+                    receipt["compile"] = counts
+                if extensions:
+                    receipt["degradation"] = extensions["org.imprint.transcript"]["payload"]
+                _write_json(receipt)
                 return 0
             if args.action == "health-check":
                 _validate_hook_event(event, "SessionStart")

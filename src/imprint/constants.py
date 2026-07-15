@@ -1,6 +1,6 @@
 """Frozen public contracts for Imprint v3."""
 
-PRODUCT_VERSION = "3.0.0"
+PRODUCT_VERSION = "3.0.1"
 STORE_SCHEMA_VERSION = "3.0.0"
 RECORD_SCHEMA_VERSION = "3.0.0"
 # Versioned independently so semantic contracts can evolve without forcing a

@@ -69,7 +69,7 @@ def main(argv: list[str]) -> int:
         if not path.is_file() or digest(path) != wanted:
             raise RuntimeError(f"checksum failure: {name}")
         inspect_zip(path) if path.suffix == ".zip" else inspect_tar(path)
-    if set(expected) != {"imprint-3.0.0.zip", "imprint-3.0.0.tar.gz"}:
+    if set(expected) != {"imprint-3.0.1.zip", "imprint-3.0.1.tar.gz"}:
         raise RuntimeError("checksum allowlist mismatch")
     print("artifact verification: PASS")
     return 0

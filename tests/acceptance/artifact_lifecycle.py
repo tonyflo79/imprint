@@ -41,7 +41,7 @@ def main() -> int:
         call_type="correct",
         reason="Silent omission corrupts the decision.",
         capture_mechanism="explicit_cli",
-        captured_by="artifact-acceptance/3.0.0",
+        captured_by="artifact-acceptance/3.0.1",
         chosen_alternatives=["Report the failed source"],
         rejected_alternatives=["Omit the failure"],
     )
@@ -158,13 +158,26 @@ def main() -> int:
         }), text=True, capture_output=True, env=env, check=False,
     )
     assert queued.returncode == 0, queued.stdout + queued.stderr
-    assert json.loads(queued.stdout)["status"] == "queued"
-    compiled = subprocess.run(
-        [str(executable), "compile", "--once"], text=True,
-        capture_output=True, env=env, check=False,
-    )
-    assert compiled.returncode == 0, compiled.stdout + compiled.stderr
-    assert json.loads(compiled.stdout)["captured"] == 1
+    queued_receipt = json.loads(queued.stdout)
+    assert queued_receipt["status"] == "queued"
+    assert queued_receipt["canonical_status"] == "compiled"
+    assert queued_receipt["compile"]["captured"] == 1
+
+    # Execute every installed bridge and verify its invalid-input failure policy.
+    install_root = executable.parents[2]
+    policies = {
+        "stop_capture.py": (2, "fail_closed"),
+        "session_start.py": (0, "fail_open"),
+        "user_prompt_submit.py": (0, "fail_open"),
+        "health_check.py": (0, "fail_open"),
+    }
+    for script, (expected_code, expected_policy) in policies.items():
+        bridged = subprocess.run(
+            [sys.executable, str(install_root / "hooks" / script)],
+            input="not-json", text=True, capture_output=True, env=env, check=False,
+        )
+        assert bridged.returncode == expected_code, bridged.stdout + bridged.stderr
+        assert json.loads(bridged.stdout)["failure_policy"] == expected_policy
 
     # Purge is its own acceptance boundary: exact confirmation and no active residue.
     preview = preview_purge(store, operator_root, operator)

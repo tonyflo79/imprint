@@ -3,6 +3,7 @@ param(
     [string]$InstallRoot = $(if ($env:IMPRINT_INSTALL_ROOT) { $env:IMPRINT_INSTALL_ROOT } else { Join-Path $env:LOCALAPPDATA "ImprintApp\app" }),
     [string]$Config = $(if ($env:IMPRINT_CONFIG) { $env:IMPRINT_CONFIG } else { Join-Path $env:APPDATA "Imprint\config.json" }),
     [string]$Settings = $(if ($env:CLAUDE_SETTINGS_PATH) { $env:CLAUDE_SETTINGS_PATH } else { Join-Path $env:USERPROFILE ".claude\settings.json" }),
+    [string]$LauncherDir = $(if ($env:IMPRINT_LAUNCHER_DIR) { $env:IMPRINT_LAUNCHER_DIR } else { Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps" }),
     [switch]$PurgeConfig
 )
 $ErrorActionPreference = "Stop"
@@ -13,10 +14,11 @@ if (-not (Test-Path $InstallRoot -PathType Container)) { throw "Imprint install 
 $RootItem = Get-Item $InstallRoot -Force
 if (($RootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Refusing a reparse-point install root: $InstallRoot" }
 $Marker = Join-Path $InstallRoot ".imprint-install-root"
-if (-not (Test-Path $Marker -PathType Leaf) -or (Get-Content -Raw $Marker) -ne "imprint-local:3.0.0`n") { throw "Refusing to remove an install root without Imprint's ownership marker: $InstallRoot" }
+if (-not (Test-Path $Marker -PathType Leaf) -or (Get-Content -Raw $Marker) -ne "imprint-local:3.0.1`n") { throw "Refusing to remove an install root without Imprint's ownership marker: $InstallRoot" }
 $Python = Join-Path $InstallRoot "venv\Scripts\python.exe"
 $Manager = Join-Path $InstallRoot "tools\manage_hooks.py"
 $Ownership = Join-Path $InstallRoot "tools\install_ownership.py"
+$Launcher = Join-Path ([IO.Path]::GetFullPath($LauncherDir)) "imprint.cmd"
 if (-not (Test-Path $Python -PathType Leaf) -or -not (Test-Path $Ownership -PathType Leaf)) { throw "Refusing uninstall because ownership tooling is missing." }
 $BasePython = (& $Python -I -S -c "import sys; print(sys._base_executable)").Trim()
 if ($LASTEXITCODE -ne 0 -or -not $BasePython -or -not (Test-Path $BasePython -PathType Leaf)) { throw "Unable to locate the external Python interpreter required for safe removal." }
@@ -37,6 +39,17 @@ try {
     if (Test-Path $Manager) {
         & $Python $Manager unregister --settings $Settings --python $Python --hooks-dir (Join-Path $InstallRoot "hooks")
         if ($LASTEXITCODE -ne 0) { throw "Managed hook removal failed; installation was left intact." }
+    }
+    if (Test-Path $Launcher -PathType Leaf) {
+        $LauncherItem = Get-Item $Launcher -Force
+        $LauncherText = Get-Content -Raw $Launcher
+        if (($LauncherItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and
+            $LauncherText -match '(?m)^rem imprint-local-owned-launcher:3\.0\.1\r?$' -and
+            $LauncherText.Contains((Join-Path $InstallRoot "venv\Scripts\imprint.exe"))) {
+            Remove-Item $Launcher -Force
+        } else {
+            Write-Warning "Leaving unowned or modified launcher intact: $Launcher"
+        }
     }
     # Windows locks a running executable. Use the venv's external base
     # interpreter so the owned venv\Scripts\python.exe can be removed safely.

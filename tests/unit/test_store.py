@@ -449,10 +449,7 @@ def test_semantic_observation_requires_matching_durable_consent(tmp_path, captur
     unauthorized_target = ImprintStore(tmp_path / "unauthorized-import.db")
     with pytest.raises(ValidationError, match="does not authorize imported"):
         import_jsonld(unauthorized_target, unauthorized)
-    with unauthorized_target.connect() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'"
-        ).fetchone()[0] == 0
+    assert not unauthorized_target.path.exists()
 
     event_mismatch = json.loads(json.dumps(portable))
     observation_version = next(

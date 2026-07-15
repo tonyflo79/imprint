@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 
 MARKER = ".imprint-install-root"
 MANIFEST = ".imprint-owned-files.json"
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 
 
 def _digest(path: Path) -> str:

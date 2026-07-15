@@ -52,15 +52,17 @@ def retrieve_payload(store, *, root: Path, session_id: str, prompt: str = "", ex
     )
     if domain_only and not explicit_domain:
         raise ValueError("domain_only retrieval requires an explicit selected domain")
-    claimed = (
-        receipts.claim_domain(safe_session, snapshot_id, explicit_domain)
-        if domain_only and explicit_domain
-        else receipts.claim_session_start(safe_session, snapshot_id)
-    )
-    if not refresh and not claimed:
-        return {"status": "already_delivered", "snapshot_id": snapshot_id, "payload": "", "selected_ids": []}
+    receipt_domain = explicit_domain if domain_only else None
+    if not refresh:
+        pending, delivered = receipts._paths(safe_session, snapshot_id, receipt_domain)
+        if delivered.exists():
+            return {"status": "already_delivered", "snapshot_id": snapshot_id, "payload": "", "selected_ids": []}
+        if pending.exists():
+            cached = receipts._decode_prepared(pending)
+            receipts.commit_delivery(safe_session, snapshot_id, receipt_domain)
+            return cached
     result = engine.retrieve(snapshot_id=snapshot_id, query=prompt, selected_domain=explicit_domain)
-    return {
+    response: dict[str, object] = {
         "status": "delivered",
         "snapshot_id": snapshot_id,
         "payload": result.payload.decode("utf-8"),
@@ -77,6 +79,16 @@ def retrieve_payload(store, *, root: Path, session_id: str, prompt: str = "", ex
             partition: list(ids) for partition, ids in result.selected_by_partition.items()
         },
     }
+    if refresh:
+        return response
+    state, cached = receipts.prepare_delivery(
+        safe_session, snapshot_id, receipt_domain, response,
+    )
+    if state == "delivered":
+        return {"status": "already_delivered", "snapshot_id": snapshot_id, "payload": "", "selected_ids": []}
+    assert cached is not None
+    receipts.commit_delivery(safe_session, snapshot_id, receipt_domain)
+    return cached
 
 __all__ = [
     "BUSINESS_DECLARED_PARTITION",

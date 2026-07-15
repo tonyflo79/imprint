@@ -14,6 +14,7 @@ from typing import Any
 from .constants import STORE_SCHEMA_VERSION
 from .errors import SafetyError, ValidationError
 from .paths import validate_data_root
+from .permissions import secure_directory, secure_file
 from .store import ImprintStore
 
 
@@ -46,7 +47,7 @@ def create_backup(store: ImprintStore, root: Path, output: Path | None = None) -
     if not store.path.exists():
         raise ValidationError("canonical database does not exist")
     target = _safe_backup_path(root, output)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    secure_directory(target.parent)
     if target.exists():
         raise SafetyError("refusing to overwrite an existing backup")
     fd, temporary_name = tempfile.mkstemp(prefix=".backup-", suffix=".sqlite3", dir=target.parent)
@@ -70,6 +71,7 @@ def create_backup(store: ImprintStore, root: Path, output: Path | None = None) -
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
+    secure_file(target)
     receipt = {
         "backup_schema_version": "1.0.0",
         "store_schema_version": STORE_SCHEMA_VERSION,
@@ -80,6 +82,7 @@ def create_backup(store: ImprintStore, root: Path, output: Path | None = None) -
     }
     receipt_path = target.with_suffix(target.suffix + ".receipt.json")
     receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+    secure_file(receipt_path)
     return {**receipt, "path": str(target), "receipt_path": str(receipt_path)}
 
 
@@ -116,7 +119,7 @@ def restore_backup(store: ImprintStore, root: Path, source: Path, *, confirmatio
     if confirmation != source.name:
         raise SafetyError("restore confirmation must exactly name the backup file")
     root = validate_data_root(root)
-    store.path.parent.mkdir(parents=True, exist_ok=True)
+    secure_directory(store.path.parent)
     safety = None
     if store.path.exists():
         safety = create_backup(store, root)
@@ -141,6 +144,7 @@ def restore_backup(store: ImprintStore, root: Path, source: Path, *, confirmatio
         Path(str(store.path) + "-shm").unlink(missing_ok=True)
     finally:
         temporary.unlink(missing_ok=True)
+    secure_file(store.path)
     restored = ImprintStore(store.path)
     if restored.integrity_check() != "ok":
         raise ValidationError("restored database failed integrity check")

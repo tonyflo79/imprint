@@ -15,7 +15,7 @@ import tarfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "release-artifacts"
 DIST = ROOT / "dist"
@@ -157,7 +157,7 @@ def write_supply_chain_metadata(source_tree_sha256: str, revision: str) -> None:
         "dataLicense": "CC0-1.0",
         "name": f"imprint-local-{VERSION}",
         "documentNamespace": f"https://github.com/RichSchefren/imprint-local/spdx/{VERSION}",
-        "creationInfo": {"created": "2026-01-01T00:00:00Z", "creators": ["Tool: imprint-release-builder-3.0.0"]},
+        "creationInfo": {"created": "2026-01-01T00:00:00Z", "creators": ["Tool: imprint-release-builder-3.0.1"]},
         "packages": [{
             "SPDXID": "SPDXRef-Package-imprint-local",
             "name": "imprint-local",
@@ -168,7 +168,7 @@ def write_supply_chain_metadata(source_tree_sha256: str, revision: str) -> None:
             "licenseDeclared": "MIT",
             "externalRefs": [],
         }],
-        "annotations": [{"annotationType": "OTHER", "annotator": "Tool: imprint-release-builder-3.0.0", "annotationDate": "2026-01-01T00:00:00Z", "comment": json.dumps(distributions, sort_keys=True)}],
+        "annotations": [{"annotationType": "OTHER", "annotator": "Tool: imprint-release-builder-3.0.1", "annotationDate": "2026-01-01T00:00:00Z", "comment": json.dumps(distributions, sort_keys=True)}],
     }
     provenance = {
         "format": 1,
