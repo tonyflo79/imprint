@@ -186,9 +186,7 @@ def _parse_large_native_transcript(path_value: str) -> dict:
             item = json.loads(raw)
         except json.JSONDecodeError as exc:
             if not complete and number == len(decoded_lines):
-                # A writer may be interrupted mid-record at EOF. Ignore only
-                # that unambiguously incomplete final fragment.
-                continue
+                raise ValidationError(f"incomplete transcript line {number}") from exc
             raise ValidationError(f"malformed complete transcript line {number}") from exc
         if not isinstance(item, dict) or item.get("type") not in {"user", "assistant"}:
             continue
@@ -959,10 +957,15 @@ def main(argv: list[str] | None = None) -> int:
                     counts = compile_spools(
                         root, store, compiler_authorized=True,
                     )
-                    if counts["quarantined"] or not acknowledgement_committed(root, path, envelope):
+                    if not acknowledgement_committed(root, path, envelope):
                         raise ImprintError("Stop capture lacks exact durable canonical acknowledgement")
                     receipt["canonical_status"] = "compiled"
                     receipt["compile"] = counts
+                    receipt["compile_status"] = (
+                        "degraded" if counts["quarantined"] else "healthy"
+                    )
+                    if counts["quarantined"]:
+                        receipt["unrelated_quarantine_count"] = counts["quarantined"]
                 if extensions:
                     receipt["degradation"] = extensions["org.imprint.transcript"]["payload"]
                 _write_json(receipt)

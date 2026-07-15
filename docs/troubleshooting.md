@@ -2,7 +2,7 @@
 
 ## Installer cannot create a virtual environment
 
-Install a complete Python 3.10–3.13 distribution with `venv` and `pip`, then rerun
+Install a complete Python 3.10 or newer distribution with `venv` and `pip`, then rerun
 the same artifact installer. On some Linux distributions, `python3-venv` is a
 separate OS package. This is a dependency fix; manually copying source files is
 not a durable substitute.

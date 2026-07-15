@@ -45,7 +45,7 @@ if [ -z "${SHELL_PROFILE}" ]; then
   esac
 fi
 
-"${PYTHON}" -c 'import sys; raise SystemExit(0 if (3, 10) <= sys.version_info < (3, 14) else "Imprint requires Python 3.10-3.13")'
+"${PYTHON}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else "Imprint requires Python 3.10 or newer")'
 case "${OPERATOR}" in *[!a-z0-9-]*|'') echo "Operator must use lowercase letters, digits, and hyphens." >&2; exit 2 ;; esac
 
 INSTALL_ROOT="$(${PYTHON} - "${INSTALL_ROOT}" <<'PY'

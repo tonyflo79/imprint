@@ -191,12 +191,113 @@ def test_windows_uninstaller_stages_cleanup_outside_owned_venv() -> None:
 
 def test_release_provenance_covers_every_shipped_and_build_input() -> None:
     package = load("package_for_provenance_test", "tools/release/package.py")
-    allowlist = package.load_allowlist()
+    verifier = load("verify_source_tree_digest", "tools/release/verify_artifacts.py")
+    allowlist = verifier.git_allowlist(ROOT, "HEAD")
     relative = {path.relative_to(ROOT).as_posix() for path in package.release_inputs(allowlist)}
     assert set(allowlist) <= relative
     assert {".gitignore", "pyproject.toml", "tools/release/package.py"} <= relative
     assert {path.relative_to(ROOT).as_posix() for path in (ROOT / "src").rglob("*.py")} <= relative
     script = (ROOT / "tools" / "release" / "package.py").read_text(encoding="utf-8")
     assert "refusing a release build from a dirty worktree" in script
-    verifier = load("verify_source_tree_digest", "tools/release/verify_artifacts.py")
     assert verifier.source_tree_digest(ROOT) == package.source_digest(allowlist)
+
+
+def _git_bound_release_files(verifier) -> dict[str, bytes]:
+    prefix = "imprint-3.0.1/"
+    files = {
+        prefix + relative: verifier.git_blob(ROOT, "HEAD", relative)
+        for relative in verifier.git_allowlist(ROOT, "HEAD")
+    }
+    sources = {
+        relative.removeprefix("src/"): verifier.git_blob(ROOT, "HEAD", relative)
+        for relative in verifier.git_source_paths(ROOT, "HEAD")
+    }
+    wheel_output = io.BytesIO()
+    dist_info = "imprint_local-3.0.1.dist-info/"
+    with zipfile.ZipFile(wheel_output, "w") as wheel:
+        def add(name: str, content: bytes | str) -> None:
+            item = zipfile.ZipInfo(name)
+            item.create_system = 3
+            item.external_attr = (stat.S_IFREG | 0o644) << 16
+            wheel.writestr(item, content)
+        for name, content in sources.items():
+            add(name, content)
+        add(dist_info + "licenses/LICENSE", verifier.git_blob(ROOT, "HEAD", "LICENSE"))
+        add(dist_info + "METADATA", "Metadata-Version: 2.4\nName: imprint-local\nVersion: 3.0.1\nRequires-Python: >=3.10\n")
+        add(dist_info + "WHEEL", "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+        add(dist_info + "entry_points.txt", "[console_scripts]\nimprint = imprint.cli:main\n")
+        add(dist_info + "top_level.txt", "imprint\n")
+        add(dist_info + "RECORD", "")
+    files[prefix + "dist/imprint_local-3.0.1-py3-none-any.whl"] = wheel_output.getvalue()
+
+    sdist_output = io.BytesIO()
+    sdist_prefix = "imprint_local-3.0.1/"
+    sdist_payload = {
+        **{sdist_prefix + "src/" + name: content for name, content in sources.items()},
+        **{sdist_prefix + name: verifier.git_blob(ROOT, "HEAD", name) for name in ("LICENSE", "README.md", "pyproject.toml")},
+        sdist_prefix + "PKG-INFO": b"Metadata-Version: 2.4\nName: imprint-local\nVersion: 3.0.1\nRequires-Python: >=3.10\n",
+        sdist_prefix + "setup.cfg": b"[egg_info]\ntag_build = \ntag_date = 0\n\n",
+    }
+    for name in ("PKG-INFO", "SOURCES.txt", "dependency_links.txt", "entry_points.txt", "requires.txt", "top_level.txt"):
+        sdist_payload[sdist_prefix + "src/imprint_local.egg-info/" + name] = b""
+    with tarfile.open(fileobj=sdist_output, mode="w:gz") as sdist:
+        for name, content in sorted(sdist_payload.items()):
+            item = tarfile.TarInfo(name)
+            item.size = len(content)
+            sdist.addfile(item, io.BytesIO(content))
+    files[prefix + "dist/imprint_local-3.0.1.tar.gz"] = sdist_output.getvalue()
+    files[prefix + "release/BUILD-PROVENANCE.json"] = b"{}"
+    files[prefix + "release/SBOM.spdx.json"] = b"{}"
+    return files
+
+
+def test_git_binding_accepts_exact_independent_source_payloads() -> None:
+    verifier = load("verify_git_bound_baseline", "tools/release/verify_artifacts.py")
+    verifier.validate_source_bindings(_git_bound_release_files(verifier), ROOT, "HEAD")
+
+
+@pytest.mark.parametrize("relative", ["hooks/_bridge.py", "install/install.sh"])
+def test_git_binding_rejects_mutated_public_hook_or_installer(relative: str) -> None:
+    verifier = load("verify_git_bound_outer", "tools/release/verify_artifacts.py")
+    files = _git_bound_release_files(verifier)
+    files["imprint-3.0.1/" + relative] += b"\nmalicious mutation\n"
+    with pytest.raises(RuntimeError, match="differs from Git blob"):
+        verifier.validate_source_bindings(files, ROOT, "HEAD")
+
+
+def test_git_binding_rejects_mutated_wheel_python_payload() -> None:
+    verifier = load("verify_git_bound_wheel", "tools/release/verify_artifacts.py")
+    files = _git_bound_release_files(verifier)
+    key = "imprint-3.0.1/dist/imprint_local-3.0.1-py3-none-any.whl"
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(files[key])) as source, zipfile.ZipFile(output, "w") as target:
+        for item in source.infolist():
+            content = source.read(item)
+            if item.filename == "imprint/backup.py":
+                content += b"\n# malicious wheel mutation\n"
+            target.writestr(item, content)
+    files[key] = output.getvalue()
+    with pytest.raises(RuntimeError, match="wheel Python payload"):
+        verifier.validate_source_bindings(files, ROOT, "HEAD")
+
+
+def test_git_binding_rejects_mutated_sdist_python_payload() -> None:
+    verifier = load("verify_git_bound_sdist", "tools/release/verify_artifacts.py")
+    files = _git_bound_release_files(verifier)
+    key = "imprint-3.0.1/dist/imprint_local-3.0.1.tar.gz"
+    output = io.BytesIO()
+    with tarfile.open(fileobj=io.BytesIO(files[key]), mode="r:gz") as source:
+        records = []
+        for item in source.getmembers():
+            extracted = source.extractfile(item) if item.isfile() else None
+            content = extracted.read() if extracted is not None else None
+            if item.name.endswith("/src/imprint/backup.py"):
+                content = (content or b"") + b"\n# malicious sdist mutation\n"
+                item.size = len(content)
+            records.append((item, content))
+    with tarfile.open(fileobj=output, mode="w:gz") as target:
+        for item, content in records:
+            target.addfile(item, io.BytesIO(content) if content is not None else None)
+    files[key] = output.getvalue()
+    with pytest.raises(RuntimeError, match="sdist payload"):
+        verifier.validate_source_bindings(files, ROOT, "HEAD")

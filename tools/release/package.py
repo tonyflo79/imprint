@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -78,11 +79,22 @@ def release_inputs(allowlist: list[str]) -> list[Path]:
     return sorted(candidates, key=lambda path: path.relative_to(ROOT).as_posix())
 
 
-def source_digest(allowlist: list[str]) -> str:
+def git_blob(revision: str, relative: str) -> bytes:
+    result = subprocess.run(
+        ["git", "show", f"{revision}:{relative}"], cwd=ROOT,
+        capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"release input is not an exact Git blob: {relative}")
+    return result.stdout
+
+
+def source_digest(allowlist: list[str], revision: str | None = None) -> str:
+    revision = revision or "HEAD"
     digest = hashlib.sha256()
     for path in release_inputs(allowlist):
-        relative = path.relative_to(ROOT).as_posix().encode()
-        digest.update(relative + b"\0" + path.read_bytes() + b"\0")
+        relative_text = path.relative_to(ROOT).as_posix()
+        digest.update(relative_text.encode() + b"\0" + git_blob(revision, relative_text) + b"\0")
     return digest.hexdigest()
 
 
@@ -103,7 +115,30 @@ def source_revision() -> str:
     return result.stdout.strip()
 
 
-def build_python_dist() -> None:
+def export_git_source(revision: str, destination: Path) -> None:
+    result = subprocess.run(
+        ["git", "archive", "--format=tar", revision], cwd=ROOT,
+        capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("unable to export the exact Git source tree")
+    with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
+        for member in archive.getmembers():
+            relative = PurePosixPath(member.name)
+            if relative.is_absolute() or ".." in relative.parts or not (member.isdir() or member.isreg()):
+                raise RuntimeError(f"unsafe Git archive member: {member.name}")
+            target = destination.joinpath(*relative.parts)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise RuntimeError(f"unreadable Git archive member: {member.name}")
+                target.write_bytes(source.read())
+
+
+def build_python_dist(revision: str) -> None:
     guarded_remove(ROOT / "build", "build")
     guarded_remove(ROOT / "src" / "imprint_local.egg-info", "src/imprint_local.egg-info")
     if any(DIST.glob("*")) if DIST.exists() else False:
@@ -112,7 +147,14 @@ def build_python_dist() -> None:
         DIST.mkdir(exist_ok=True)
     env = os.environ.copy()
     env.update({"SOURCE_DATE_EPOCH": str(SOURCE_DATE_EPOCH), "PYTHONHASHSEED": "0"})
-    subprocess.run([sys.executable, "-m", "build", "--outdir", str(DIST), str(ROOT)], check=True, env=env)
+    with tempfile.TemporaryDirectory(prefix="imprint-git-build-") as temporary:
+        source_root = Path(temporary) / "source"
+        source_root.mkdir()
+        export_git_source(revision, source_root)
+        subprocess.run(
+            [sys.executable, "-m", "build", "--outdir", str(DIST), str(source_root)],
+            check=True, env=env,
+        )
     names = sorted(path.name for path in DIST.iterdir() if path.is_file())
     if len(names) != 2 or not any(name.endswith(".whl") for name in names) or not any(name.endswith(".tar.gz") for name in names):
         raise RuntimeError(f"unexpected Python distribution set: {names}")
@@ -241,16 +283,16 @@ def build_tar(path: Path) -> None:
 def main() -> int:
     allowlist = load_allowlist()
     revision = source_revision()
-    initial_source_digest = source_digest(allowlist)
+    initial_source_digest = source_digest(allowlist, revision)
     guarded_reset(OUTPUT, "release-artifacts")
-    build_python_dist()
-    if source_digest(allowlist) != initial_source_digest or source_revision() != revision:
+    build_python_dist(revision)
+    if source_digest(allowlist, revision) != initial_source_digest or source_revision() != revision:
         raise RuntimeError("source tree changed during release build; retry from a stable revision")
     STAGE.mkdir()
     for item in allowlist:
-        source, destination = ROOT / item, STAGE / item
+        destination = STAGE / item
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+        destination.write_bytes(git_blob(revision, item))
     shutil.copytree(DIST, STAGE / "dist")
     write_supply_chain_metadata(initial_source_digest, revision)
     validate_stage(allowlist)

@@ -66,11 +66,10 @@ def _lease_timestamp(value: Any) -> datetime:
     return parsed
 
 
-def compiler_lock_state(operator_root: Path) -> dict[str, Any]:
-    lock = Path(operator_root) / "compiler.lock"
-    owner_path = _lock_owner_path(Path(operator_root))
+def _compiler_lock_directory_state(lock: Path) -> dict[str, Any]:
     if not lock.exists():
         return {"state": "absent", "stale": False}
+    owner_path = lock / "owner.json"
     try:
         owner = json.loads(owner_path.read_text(encoding="ascii"))
         if not isinstance(owner, dict) or set(owner) != {
@@ -92,13 +91,25 @@ def compiler_lock_state(operator_root: Path) -> dict[str, Any]:
             raise ValueError("lease values are invalid")
         age = max(0, int((datetime.now(timezone.utc) - heartbeat).total_seconds()))
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-        return {"state": "invalid", "stale": True, "age_seconds": -1}
+        try:
+            age = max(0, int(datetime.now(timezone.utc).timestamp() - lock.stat().st_mtime))
+        except OSError:
+            age = -1
+        return {
+            "state": "invalid",
+            "stale": age >= LOCK_STALE_SECONDS,
+            "age_seconds": age,
+        }
     local_owner = owner["host"] == socket.gethostname()
     pid_alive = _local_pid_alive(owner["pid"]) if local_owner else None
     stale = age >= LOCK_STALE_SECONDS and (not local_owner or pid_alive is False)
     return {"state": "held", "stale": stale,
             "age_seconds": age, "nonce": owner.get("nonce"), "host": owner.get("host"),
             "pid": owner.get("pid"), "local_owner": local_owner, "pid_alive": pid_alive}
+
+
+def compiler_lock_state(operator_root: Path) -> dict[str, Any]:
+    return _compiler_lock_directory_state(Path(operator_root) / "compiler.lock")
 
 
 def recover_stale_compiler_lock(operator_root: Path, *, confirmation: str) -> dict[str, Any]:
@@ -137,6 +148,21 @@ def recover_stale_compiler_lock(operator_root: Path, *, confirmation: str) -> di
     if names - allowed:
         raise SafetyError("compiler lock contains unowned residue; recovery refused")
 
+    # Recheck immediately before claiming. In particular, a compiler owns the
+    # directory from mkdir onward even though owner.json is written next.
+    rechecked = compiler_lock_state(root)
+    try:
+        rechecked_stat = lock.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise SafetyError("compiler lock changed before recovery claim") from exc
+    if (
+        not rechecked.get("stale")
+        or rechecked.get("state") != state.get("state")
+        or rechecked.get("nonce") != state.get("nonce")
+        or (rechecked_stat.st_dev, rechecked_stat.st_ino) != (before.st_dev, before.st_ino)
+    ):
+        raise SafetyError("compiler lock changed before recovery claim")
+
     claimed = root / f".compiler-lock-recovery-{uuid.uuid4().hex}"
     try:
         os.replace(lock, claimed)
@@ -145,6 +171,13 @@ def recover_stale_compiler_lock(operator_root: Path, *, confirmation: str) -> di
     try:
         after = claimed.stat(follow_symlinks=False)
         owner_after = (claimed / "owner.json").read_bytes() if (claimed / "owner.json").is_file() else None
+        claimed_state = _compiler_lock_directory_state(claimed)
+        if (
+            not claimed_state.get("stale")
+            or claimed_state.get("state") != state.get("state")
+            or claimed_state.get("nonce") != state.get("nonce")
+        ):
+            raise SafetyError("compiler lock ownership changed during recovery claim")
         if (before.st_dev, before.st_ino, owner_before) != (after.st_dev, after.st_ino, owner_after):
             raise SafetyError("compiler lock changed during recovery claim")
         for item in tuple(claimed.iterdir()):
@@ -376,10 +409,20 @@ def compile_spools(operator_root: Path, store: ImprintStore, *, compiler_authori
         counts = {"captured": 0, "duplicate": 0, "quarantined": 0}
         for path in sorted((operator_root / "spool").glob("*/*.json")):
             try:
-                envelope = json.loads(path.read_text(encoding="utf-8"))
+                raw = path.read_text(encoding="utf-8")
+            except UnicodeError as exc:
+                _quarantine_receipt(operator_root, path, exc)
+                counts["quarantined"] += 1
+                continue
+            except OSError:
+                # Filesystem failure is infrastructure failure. Quarantine is
+                # reserved for content that was successfully read and rejected.
+                raise
+            try:
+                envelope = json.loads(raw)
                 if not isinstance(envelope, dict):
                     raise ValueError("spool payload must be an object")
-            except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
                 _quarantine_receipt(operator_root, path, exc)
                 counts["quarantined"] += 1
                 continue

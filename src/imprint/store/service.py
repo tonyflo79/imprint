@@ -58,12 +58,25 @@ class ImprintStore:
             raise ValidationError("operator does not match configured identity")
 
     def initialize(self) -> None:
-        if self.path.exists():
-            self._require_existing_store_compatible()
+        existing = self.path.exists()
         secure_directory(self.path.parent)
-        self._compatibility_verified = True
         try:
-            with self.connect() as conn:
+            if existing:
+                context = self.connect()
+            else:
+                @contextmanager
+                def new_store_connection():
+                    conn = sqlite3.connect(self.path, timeout=30)
+                    try:
+                        yield conn
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
+                    finally:
+                        conn.close()
+                context = new_store_connection()
+            with context as conn:
                 conn.executescript(SCHEMA_SQL)
                 conn.execute(
                     "INSERT OR IGNORE INTO meta(key,value) VALUES('store_schema_version',?)",
@@ -73,16 +86,57 @@ class ImprintStore:
                     "INSERT OR IGNORE INTO meta(key,value) VALUES('ontology_schema_version',?)",
                     (ONTOLOGY_SCHEMA_VERSION,),
                 )
+            secure_file(self.path)
+            self._compatibility_verified = True
         except Exception:
             self._compatibility_verified = False
             raise
 
-    def _require_existing_store_compatible(self) -> None:
+    @staticmethod
+    def _require_connection_compatible(
+        conn: sqlite3.Connection, *,
+        store_versions: frozenset[str] = frozenset({STORE_SCHEMA_VERSION}),
+        ontology_versions: frozenset[str] | None = frozenset({ONTOLOGY_SCHEMA_VERSION}),
+    ) -> None:
+        """Validate the exact open database handle before any mutable PRAGMA or DDL."""
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+        ).fetchone()
+        if table is None:
+            raise ValidationError("existing store is missing schema metadata")
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='store_schema_version'"
+        ).fetchone()
+        if row is None:
+            raise ValidationError("existing store is missing store_schema_version")
+        if not isinstance(row[0], str) or row[0] not in store_versions:
+            raise ValidationError(
+                f"incompatible store schema {row[0]!r}; expected one of {sorted(store_versions)}"
+            )
+        ontology = conn.execute(
+            "SELECT value FROM meta WHERE key='ontology_schema_version'"
+        ).fetchone()
+        if ontology is None:
+            raise ValidationError("existing store is missing ontology_schema_version")
+        if (
+            not isinstance(ontology[0], str)
+            or (ontology_versions is not None and ontology[0] not in ontology_versions)
+        ):
+            raise ValidationError(
+                f"incompatible ontology schema {ontology[0]!r}"
+            )
+
+    def _require_existing_store_compatible(
+        self, *,
+        store_versions: frozenset[str] = frozenset({STORE_SCHEMA_VERSION}),
+        ontology_versions: frozenset[str] | None = frozenset({ONTOLOGY_SCHEMA_VERSION}),
+    ) -> tuple[int, int]:
         """Inspect an existing database without permitting SQLite side effects."""
         try:
             resolved = self.path.resolve(strict=True)
             if not resolved.is_file() or self.path.is_symlink():
                 raise ValidationError("store path must be a regular non-symlink file")
+            before = resolved.stat(follow_symlinks=False)
             sidecars = tuple(
                 Path(str(resolved) + suffix) for suffix in ("-wal", "-shm")
             )
@@ -93,31 +147,17 @@ class ImprintStore:
             uri = f"{resolved.as_uri()}?mode=ro&immutable=1"
             conn = sqlite3.connect(uri, uri=True, timeout=5)
             try:
-                table = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
-                ).fetchone()
-                if table is None:
-                    raise ValidationError("existing store is missing schema metadata")
-                row = conn.execute(
-                    "SELECT value FROM meta WHERE key='store_schema_version'"
-                ).fetchone()
-                if row is None:
-                    raise ValidationError("existing store is missing store_schema_version")
-                if not isinstance(row[0], str) or row[0] != STORE_SCHEMA_VERSION:
-                    raise ValidationError(
-                        f"incompatible store schema {row[0]!r}; expected {STORE_SCHEMA_VERSION}"
-                    )
-                ontology = conn.execute(
-                    "SELECT value FROM meta WHERE key='ontology_schema_version'"
-                ).fetchone()
-                if ontology is None:
-                    raise ValidationError("existing store is missing ontology_schema_version")
-                if not isinstance(ontology[0], str) or ontology[0] != ONTOLOGY_SCHEMA_VERSION:
-                    raise ValidationError(
-                        f"incompatible ontology schema {ontology[0]!r}; expected {ONTOLOGY_SCHEMA_VERSION}"
-                    )
+                self._require_connection_compatible(
+                    conn, store_versions=store_versions,
+                    ontology_versions=ontology_versions,
+                )
             finally:
                 conn.close()
+            after = resolved.stat(follow_symlinks=False)
+            identity = (before.st_dev, before.st_ino)
+            if identity != (after.st_dev, after.st_ino):
+                raise ValidationError("store path changed during compatibility validation")
+            return identity
         except ValidationError:
             raise
         except (OSError, sqlite3.DatabaseError) as exc:
@@ -125,24 +165,90 @@ class ImprintStore:
 
     @contextmanager
     def connect(self):
-        if not self._compatibility_verified:
-            if not self.path.exists():
-                raise ValidationError("store must be initialized before use")
-            self._require_existing_store_compatible()
-            self._compatibility_verified = True
-        conn = sqlite3.connect(self.path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
+        if not self.path.exists():
+            raise ValidationError("store must be initialized before use")
+        identity = self._require_existing_store_compatible()
         try:
+            resolved = self.path.resolve(strict=True)
+            conn = sqlite3.connect(
+                f"{resolved.as_uri()}?mode=rw", uri=True, timeout=30,
+            )
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise ValidationError("store changed before connection") from exc
+        handle_validated = False
+        try:
+            self._require_connection_compatible(conn)
+            current = self.path.resolve(strict=True).stat(follow_symlinks=False)
+            if identity != (current.st_dev, current.st_ino):
+                raise ValidationError("store path changed before connection")
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys=ON")
+            handle_validated = True
             yield conn
+            committed_path = self.path.resolve(strict=True).stat(follow_symlinks=False)
+            if identity != (committed_path.st_dev, committed_path.st_ino):
+                raise ValidationError("store path changed before commit")
             conn.commit()
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
+            if not handle_validated:
+                for sidecar in (
+                    Path(str(resolved) + "-wal"), Path(str(resolved) + "-shm"),
+                ):
+                    sidecar.unlink(missing_ok=True)
             if self.path.exists():
-                secure_file(self.path)
+                try:
+                    current = self.path.resolve(strict=True).stat(follow_symlinks=False)
+                    if identity == (current.st_dev, current.st_ino):
+                        secure_file(self.path)
+                except OSError:
+                    pass
+
+    @contextmanager
+    def _migration_connection(
+        self, *, store_versions: frozenset[str],
+        ontology_versions: frozenset[str] | None = frozenset({ONTOLOGY_SCHEMA_VERSION}),
+    ):
+        """Restricted compatibility exception for explicit migration code only.
+
+        Canonical writers never call this path; their ordinary ``connect``
+        remains pinned to the current store and ontology contracts.
+        """
+        if not store_versions or any(not isinstance(item, str) or not item for item in store_versions):
+            raise ValidationError("migration store versions are invalid")
+        identity = self._require_existing_store_compatible(
+            store_versions=store_versions, ontology_versions=ontology_versions,
+        )
+        resolved = self.path.resolve(strict=True)
+        conn = sqlite3.connect(f"{resolved.as_uri()}?mode=rw", uri=True, timeout=30)
+        handle_validated = False
+        try:
+            self._require_connection_compatible(
+                conn, store_versions=store_versions,
+                ontology_versions=ontology_versions,
+            )
+            current = self.path.resolve(strict=True).stat(follow_symlinks=False)
+            if identity != (current.st_dev, current.st_ino):
+                raise ValidationError("store path changed before migration connection")
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys=ON")
+            handle_validated = True
+            yield conn
+            committed_path = self.path.resolve(strict=True).stat(follow_symlinks=False)
+            if identity != (committed_path.st_dev, committed_path.st_ino):
+                raise ValidationError("store path changed before migration commit")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+            if not handle_validated:
+                for suffix in ("-wal", "-shm"):
+                    Path(str(resolved) + suffix).unlink(missing_ok=True)
 
     def integrity_check(self) -> str:
         with self.connect() as conn:

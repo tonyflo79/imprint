@@ -157,6 +157,52 @@ def test_huge_transcript_fails_closed_on_malformed_complete_tail_line(tmp_path):
     assert not list((data / "test" / "spool").glob("*/*.json"))
 
 
+def test_transcript_fails_closed_on_incomplete_final_json_instead_of_using_older_user(tmp_path):
+    config, data = _config(tmp_path, compiler=True)
+    transcript = tmp_path / "incomplete-final.jsonl"
+    older = json.dumps({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": "No, this older correction must never substitute for a partial newer turn.",
+        },
+    })
+    transcript.write_text(older + '\n{"type":"user","message":{"content":"No, newer')
+
+    result = _hook(config, "stop-capture", {
+        "hook_event_name": "Stop", "session_id": "incomplete-final",
+        "transcript_path": str(transcript),
+    })
+    assert result.returncode == 2
+    assert "incomplete transcript line" in result.stdout
+    assert not list((data / "test" / "spool").glob("*/*.json"))
+
+
+def test_stop_current_ack_succeeds_with_truthful_unrelated_quarantine_metadata(tmp_path):
+    config, data = _config(tmp_path, compiler=True)
+    unrelated = data / "test" / "spool" / "other-node" / "malformed.json"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text('{"unrelated":"malformed"')
+
+    result = _hook(config, "stop-capture", {
+        "session_id": "mixed-spool-current",
+        "operator_text": "No, compile this exact correction even when an unrelated spool is malformed.",
+    })
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["canonical_status"] == "compiled"
+    assert receipt["compile"] == {
+        "captured": 1, "duplicate": 0, "quarantined": 1,
+    }
+    assert receipt["compile_status"] == "degraded"
+    assert receipt["unrelated_quarantine_count"] == 1
+    store = ImprintStore(data / "test" / "imprint.db")
+    current = store.current_nodes(["Verdict"])
+    assert len(current) == 1
+    assert current[0]["payload"]["raw_operator_text"].startswith("No, compile this exact")
+    assert len(list((data / "test" / "runtime" / "acknowledgements" / "primary").glob("*.json"))) == 1
+
+
 def test_stop_never_claims_compiled_without_exact_durable_ack(
     tmp_path, monkeypatch, capsys,
 ):

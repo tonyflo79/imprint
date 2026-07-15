@@ -103,6 +103,8 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         reasons.append("disk_space_exhausted")
     if values.stale_lock_count > 0:
         reasons.append("stale_lock_present")
+    if values.compiler_state == "invalid":
+        reasons.append("compiler_lock_invalid")
     if values.abandoned_temp_count > 0:
         reasons.append("abandoned_temp_present")
     if not values.backup_verified or not values.backup_restoreable or values.invalid_backup_count > 0:

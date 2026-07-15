@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -52,6 +53,37 @@ def test_store_refuses_existing_wal_or_shm_without_touching_any_bytes(tmp_path):
     assert {item: item.read_bytes() for item in (path, wal, shm)} == before
 
 
+def test_store_rechecks_open_handle_after_preflight_path_replacement(tmp_path, monkeypatch):
+    path = tmp_path / "imprint.db"
+    original = ImprintStore(path)
+    original.initialize()
+    future = tmp_path / "future.db"
+    ImprintStore(future).initialize()
+    with sqlite3.connect(future) as connection:
+        connection.execute("UPDATE meta SET value='999.0.0' WHERE key='store_schema_version'")
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    Path(str(future) + "-wal").unlink(missing_ok=True)
+    Path(str(future) + "-shm").unlink(missing_ok=True)
+    future_before = future.read_bytes()
+
+    store = ImprintStore(path)
+    real_preflight = store._require_existing_store_compatible
+
+    def replace_after_preflight():
+        identity = real_preflight()
+        os.replace(future, path)
+        return identity
+
+    monkeypatch.setattr(store, "_require_existing_store_compatible", replace_after_preflight)
+    with pytest.raises(ValidationError, match="incompatible store schema"):
+        with store.connect() as connection:
+            connection.execute("CREATE TABLE must_not_exist(value TEXT)")
+    assert path.read_bytes() == future_before
+    assert not Path(str(path) + "-wal").exists()
+    assert not Path(str(path) + "-shm").exists()
+
+
 def test_canonical_provenance_records_product_not_store_schema_version(tmp_path, capture_envelope):
     store = ImprintStore(tmp_path / "imprint.db")
     store.initialize()
@@ -60,6 +92,19 @@ def test_canonical_provenance_records_product_not_store_schema_version(tmp_path,
         versions = connection.execute("SELECT provenance_json FROM node_versions").fetchall()
     assert versions
     assert {json.loads(row[0])["software"]["version"] for row in versions} == {PRODUCT_VERSION}
+
+
+def test_restricted_migration_inspection_cannot_weaken_canonical_writes(tmp_path, capture_envelope):
+    store = ImprintStore(tmp_path / "imprint.db")
+    store.initialize()
+    with store._migration_connection(
+        store_versions=frozenset({"3.0.0"}), ontology_versions=None,
+    ) as connection:
+        connection.execute("UPDATE meta SET value='3.0.0' WHERE key='ontology_schema_version'")
+    with pytest.raises(ValidationError, match="incompatible ontology schema"):
+        store.apply_capture(capture_envelope)
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
 
 
 def _rewrite_receipt_hash(backup: dict) -> None:
@@ -116,6 +161,29 @@ def test_restore_validates_staged_copy_before_touching_live_database(
 
     monkeypatch.setattr(backup_module.shutil, "copyfile", corrupt_staged)
     with pytest.raises(ValidationError, match="corrupt"):
+        restore_backup(store, root, Path(backup["path"]), confirmation=Path(backup["path"]).name)
+    assert store.path.read_bytes() == live_before
+
+
+def test_restore_refuses_valid_schema_source_substitution_at_copy_boundary(
+    tmp_path, capture_envelope, monkeypatch,
+):
+    root = tmp_path / "operator"
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    store.apply_capture(capture_envelope)
+    backup = create_backup(store, root)
+    live_before = store.path.read_bytes()
+    substitute = tmp_path / "different-valid.db"
+    ImprintStore(substitute).initialize()
+    real_copyfile = shutil.copyfile
+
+    def substitute_valid_database(source, destination, *args, **kwargs):
+        chosen = substitute if Path(destination).name.startswith(".restore-") else source
+        return real_copyfile(chosen, destination, *args, **kwargs)
+
+    monkeypatch.setattr(backup_module.shutil, "copyfile", substitute_valid_database)
+    with pytest.raises(ValidationError, match="staged backup bytes"):
         restore_backup(store, root, Path(backup["path"]), confirmation=Path(backup["path"]).name)
     assert store.path.read_bytes() == live_before
 

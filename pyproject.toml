@@ -7,7 +7,7 @@ name = "imprint-local"
 version = "3.0.1"
 description = "Local-first provenance-preserving judgment capture and retrieval for Claude Code"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10"
 license = "MIT"
 authors = [{name = "Richard Schefren"}]
 dependencies = []
@@ -17,6 +17,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
 ]
 
 [project.optional-dependencies]

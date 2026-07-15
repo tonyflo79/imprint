@@ -30,7 +30,7 @@ observation is roadmap-only and is not included or claimed by this release.
 
 ## Requirements
 
-- Python 3.10–3.13 with `venv` and `pip`.
+- Python 3.10 or newer, including Python 3.14, with `venv` and `pip`.
 - Claude Code only if you want automatic hook integration. The CLI and store can
   be used without Claude Code.
 - A local, non-cloud-synchronized data directory. Network drives and shared

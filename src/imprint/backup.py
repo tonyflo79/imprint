@@ -171,13 +171,20 @@ def verify_backup(path: Path) -> dict[str, Any]:
     inspected = _inspect_database(target)
     return {
         "status": "verified", "path": str(target), "sha256": actual_hash,
+        "bytes": receipt["bytes"],
         **inspected,
     }
 
 
+def _require_staged_identity(path: Path, verified: dict[str, Any]) -> None:
+    """Bind a staged restore candidate to the exact previously verified bytes."""
+    if path.stat().st_size != verified["bytes"] or _sha256(path) != verified["sha256"]:
+        raise ValidationError("staged backup bytes do not match verified source")
+
+
 def restore_backup(store: ImprintStore, root: Path, source: Path, *, confirmation: str) -> dict[str, Any]:
     source = source.expanduser()
-    verify_backup(source)
+    verified = verify_backup(source)
     source = source.resolve(strict=True)
     if confirmation != source.name:
         raise SafetyError("restore confirmation must exactly name the backup file")
@@ -192,6 +199,7 @@ def restore_backup(store: ImprintStore, root: Path, source: Path, *, confirmatio
     try:
         shutil.copyfile(source, temporary)
         _inspect_database(temporary)
+        _require_staged_identity(temporary, verified)
         if live_existed and any(sidecar.exists() for sidecar in _sidecars(store.path)):
             raise ValidationError("live database has WAL/SHM sidecars; close it before restore")
         if live_existed:
@@ -201,6 +209,9 @@ def restore_backup(store: ImprintStore, root: Path, source: Path, *, confirmatio
                 os.link(store.path, rollback)
             except OSError:
                 shutil.copyfile(store.path, rollback)
+        # Recheck immediately before replacement so neither source substitution
+        # nor staged-file replacement can cross the verified restore boundary.
+        _require_staged_identity(temporary, verified)
         os.replace(temporary, store.path)
         try:
             secure_file(store.path)

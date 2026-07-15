@@ -32,11 +32,16 @@ def parse_native_stop_transcript(path_value: str) -> dict[str, str | None]:
     if size <= 0 or size > MAX_TRANSCRIPT_BYTES:
         raise ValidationError("transcript_path size is outside the supported bound")
     messages: list[tuple[str, str]] = []
-    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    for number, raw_line in enumerate(lines, start=1):
+        complete = raw_line.endswith(("\n", "\r"))
+        raw = raw_line.rstrip("\r\n")
         try:
             item = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise ValidationError(f"invalid transcript JSONL at line {number}") from exc
+            if not complete and number == len(lines):
+                raise ValidationError(f"incomplete transcript line {number}") from exc
+            raise ValidationError(f"malformed complete transcript line {number}") from exc
         if not isinstance(item, dict) or item.get("type") not in {"user", "assistant"}:
             continue
         message = item.get("message", {})

@@ -23,8 +23,8 @@ function Set-PrivateAcl([string]$Path) {
 }
 
 if ($Operator -notmatch '^[a-z0-9][a-z0-9-]*$') { throw "Operator must use lowercase letters, digits, and hyphens." }
-& $Python -c "import sys; raise SystemExit(0 if (3,10) <= sys.version_info < (3,14) else 'Imprint requires Python 3.10-3.13')"
-if ($LASTEXITCODE -ne 0) { throw "Python 3.10-3.13 is required." }
+& $Python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 'Imprint requires Python 3.10 or newer')"
+if ($LASTEXITCODE -ne 0) { throw "Python 3.10 or newer is required." }
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $VolumeRoot = [IO.Path]::GetPathRoot($InstallRoot)
 if ($InstallRoot -eq $VolumeRoot -or $InstallRoot -eq [IO.Path]::GetFullPath($env:USERPROFILE)) { throw "Refusing an unsafe install root: $InstallRoot" }

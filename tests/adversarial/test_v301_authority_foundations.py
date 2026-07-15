@@ -4,6 +4,8 @@ import json
 import os
 import socket
 import sqlite3
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -11,7 +13,8 @@ import pytest
 from imprint.capture.schema import build_capture_envelope, new_urn
 from imprint.compiler import compile_spools, write_envelope
 from imprint.compiler.spool import (
-    INVALID_LOCK_CONFIRMATION, compiler_lock_state, recover_stale_compiler_lock,
+    INVALID_LOCK_CONFIRMATION, LOCK_STALE_SECONDS, compiler_lock_state,
+    recover_stale_compiler_lock,
 )
 from imprint.config import load_config
 from imprint.errors import SafetyError, ValidationError
@@ -89,6 +92,14 @@ def test_stale_heartbeat_requires_dead_local_pid(tmp_path):
 def test_invalid_empty_lock_requires_explicit_recovery_phrase(tmp_path):
     lock = tmp_path / "compiler.lock"
     lock.mkdir()
+    state = compiler_lock_state(tmp_path)
+    assert state["state"] == "invalid" and state["stale"] is False
+    with pytest.raises(SafetyError, match="not stale"):
+        recover_stale_compiler_lock(
+            tmp_path, confirmation=INVALID_LOCK_CONFIRMATION,
+        )
+    old = time.time() - LOCK_STALE_SECONDS - 2
+    os.utime(lock, (old, old))
     with pytest.raises(SafetyError, match="RECOVER-INVALID-LOCK"):
         recover_stale_compiler_lock(tmp_path, confirmation="anything")
     result = recover_stale_compiler_lock(
@@ -114,9 +125,89 @@ def test_stale_lock_recovery_refuses_unowned_residue(tmp_path):
     lock = tmp_path / "compiler.lock"
     lock.mkdir()
     (lock / "unowned.txt").write_text("preserve")
+    old = time.time() - LOCK_STALE_SECONDS - 2
+    os.utime(lock, (old, old))
     with pytest.raises(SafetyError, match="unowned residue"):
         recover_stale_compiler_lock(tmp_path, confirmation=INVALID_LOCK_CONFIRMATION)
     assert (lock / "unowned.txt").read_text() == "preserve"
+
+
+def test_recovery_cannot_steal_compiler_during_mkdir_owner_startup(tmp_path, monkeypatch):
+    import imprint.compiler.spool as spool_module
+
+    owner_write_entered = threading.Event()
+    allow_owner_write = threading.Event()
+    original = spool_module._write_lock_owner
+    calls = 0
+
+    def delayed_owner_write(path, owner):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            owner_write_entered.set()
+            assert allow_owner_write.wait(timeout=5)
+        return original(path, owner)
+
+    monkeypatch.setattr(spool_module, "_write_lock_owner", delayed_owner_write)
+    failures = []
+
+    def compile_in_thread():
+        try:
+            compile_spools(
+                tmp_path, ImprintStore(tmp_path / "imprint.db"),
+                compiler_authorized=True,
+            )
+        except Exception as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    worker = threading.Thread(target=compile_in_thread)
+    worker.start()
+    assert owner_write_entered.wait(timeout=5)
+    state = compiler_lock_state(tmp_path)
+    assert state["state"] == "invalid" and state["stale"] is False
+    with pytest.raises(SafetyError, match="not stale"):
+        recover_stale_compiler_lock(
+            tmp_path, confirmation=INVALID_LOCK_CONFIRMATION,
+        )
+    allow_owner_write.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert failures == []
+    assert compiler_lock_state(tmp_path) == {"state": "absent", "stale": False}
+
+
+def test_recovery_revalidates_live_owner_after_atomic_claim(tmp_path, monkeypatch):
+    import imprint.compiler.spool as spool_module
+
+    lock = tmp_path / "compiler.lock"
+    lock.mkdir()
+    old = time.time() - LOCK_STALE_SECONDS - 2
+    os.utime(lock, (old, old))
+    real_replace = spool_module.os.replace
+    injected = {"done": False}
+
+    def replace_with_owner_race(source, destination):
+        source_path = os.fspath(source)
+        destination_path = os.fspath(destination)
+        if Path(source_path) == lock and ".compiler-lock-recovery-" in destination_path:
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            (lock / "owner.json").write_text(json.dumps(_owner(
+                pid=os.getpid(), host=socket.gethostname(), created_at=now,
+                heartbeat_at=now,
+            )))
+            injected["done"] = True
+        return real_replace(source, destination)
+
+    from pathlib import Path
+    monkeypatch.setattr(spool_module.os, "replace", replace_with_owner_race)
+    with pytest.raises(SafetyError, match="ownership changed"):
+        recover_stale_compiler_lock(
+            tmp_path, confirmation=INVALID_LOCK_CONFIRMATION,
+        )
+    assert injected["done"] is True
+    state = compiler_lock_state(tmp_path)
+    assert state["state"] == "held" and state["stale"] is False
+    assert state["pid_alive"] is True
 
 
 def test_compiler_propagates_infrastructure_failure_instead_of_quarantine(tmp_path):
@@ -137,6 +228,30 @@ def test_compiler_propagates_infrastructure_failure_instead_of_quarantine(tmp_pa
 
     with pytest.raises(OSError, match="disk I/O"):
         compile_spools(tmp_path, BrokenStore(), compiler_authorized=True)
+    assert not (tmp_path / "quarantine").exists()
+
+
+def test_compiler_propagates_spool_read_oserror_without_quarantine(tmp_path, monkeypatch):
+    envelope = build_capture_envelope(
+        operator_id=new_urn("operator"), session_id=new_urn("session"),
+        node_id="primary", case_description="read failure boundary",
+        raw_operator_text="No, preserve the read failure because it is infrastructure.",
+        call_type="correct", capture_mechanism="explicit_cli", captured_by="audit",
+    )
+    source = write_envelope(tmp_path, envelope)
+    original = type(source).read_text
+
+    def failing_read(path, *args, **kwargs):
+        if path == source:
+            raise OSError("spool device read failed")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(source), "read_text", failing_read)
+    with pytest.raises(OSError, match="spool device read failed"):
+        compile_spools(
+            tmp_path, ImprintStore(tmp_path / "imprint.db"),
+            compiler_authorized=True,
+        )
     assert not (tmp_path / "quarantine").exists()
 
 
