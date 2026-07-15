@@ -16,12 +16,27 @@ $ArtifactRoot = Split-Path -Parent $ScriptDir
 function Set-PrivateAcl([string]$Path) {
     $Sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $Item = Get-Item $Path -Force
-    $UserGrant = if ($Item.PSIsContainer) { "*$Sid`:(OI)(CI)F" } else { "*$Sid`:F" }
-    $SystemGrant = if ($Item.PSIsContainer) { "*S-1-5-18`:(OI)(CI)F" } else { "*S-1-5-18`:F" }
     & icacls.exe $Path /setowner "*$Sid" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Unable to set the private Imprint path owner: $Path" }
-    & icacls.exe $Path /inheritance:r /grant:r $UserGrant $SystemGrant | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Unable to restrict private Imprint path: $Path" }
+    $Acl = Get-Acl -LiteralPath $Path
+    $Acl.SetAccessRuleProtection($true, $false)
+    foreach ($Rule in @($Acl.Access)) { [void]$Acl.RemoveAccessRuleSpecific($Rule) }
+    $Inheritance = if ($Item.PSIsContainer) {
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else { [Security.AccessControl.InheritanceFlags]::None }
+    foreach ($AllowedSid in @($Sid, "S-1-5-18")) {
+        $Identity = [Security.Principal.SecurityIdentifier]::new($AllowedSid)
+        $Grant = [Security.AccessControl.FileSystemAccessRule]::new(
+            $Identity,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $Inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$Acl.AddAccessRule($Grant)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $Acl
 }
 
 if ($Operator -notmatch '^[a-z0-9][a-z0-9-]*$') { throw "Operator must use lowercase letters, digits, and hyphens." }

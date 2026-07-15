@@ -189,11 +189,14 @@ def test_windows_uninstaller_stages_cleanup_outside_owned_venv() -> None:
     assert "& $Python $Ownership uninstall --root $InstallRoot" not in script
 
 
-def test_windows_installer_sets_private_owner_before_acl_grants() -> None:
+def test_windows_installer_sets_exact_private_acl_after_owner() -> None:
     script = (ROOT / "install" / "install.ps1").read_text(encoding="utf-8")
     owner = script.index('/setowner "*$Sid"')
-    grants = script.index("/inheritance:r /grant:r")
-    assert owner < grants
+    protection = script.index("SetAccessRuleProtection($true, $false)")
+    purge = script.index("RemoveAccessRuleSpecific")
+    grants = script.index("FileSystemAccessRule]::new")
+    apply_acl = script.index("Set-Acl -LiteralPath $Path -AclObject $Acl")
+    assert owner < protection < purge < grants < apply_acl
 
 
 def test_windows_acl_inspection_is_utf8_and_fail_closed() -> None:
