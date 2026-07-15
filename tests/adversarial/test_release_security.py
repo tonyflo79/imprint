@@ -201,6 +201,11 @@ def test_windows_installer_sets_exact_private_acl_after_owner() -> None:
 
 def test_windows_acl_inspection_is_utf8_and_fail_closed() -> None:
     script = (ROOT / "src" / "imprint" / "permissions.py").read_text(encoding="utf-8")
+    assert "def _secure_windows_paths" in script
+    assert "$acl.SetOwner($current)" in script
+    assert "$acl.SetAccessRuleProtection($true, $false)" in script
+    assert "_secure_windows_paths([target])" in script
+    assert "_secure_windows_paths(candidates)" in script
     assert 'shutil.which("pwsh.exe") or shutil.which("powershell.exe")' in script
     assert '[Console]::InputEncoding = $utf8' in script
     assert '[Console]::OutputEncoding = $utf8' in script

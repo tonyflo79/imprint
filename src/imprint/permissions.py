@@ -13,13 +13,68 @@ PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 
 
+def _secure_windows_paths(paths: list[Path]) -> None:
+    """Set current-user ownership and an exact user/SYSTEM DACL."""
+    if not paths:
+        return
+    executable = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+    if executable is None:
+        raise OSError("PowerShell is required to secure private Imprint state")
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$utf8 = [Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+$paths = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$current = [Security.Principal.WindowsIdentity]::GetCurrent().User
+foreach ($path in $paths) {
+  $item = Get-Item -Force -LiteralPath $path
+  if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "refusing reparse-point private state"
+  }
+  $acl = Get-Acl -LiteralPath $path
+  $acl.SetOwner($current)
+  $acl.SetAccessRuleProtection($true, $false)
+  foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($rule) }
+  $inheritance = if ($item.PSIsContainer) {
+    [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+      [Security.AccessControl.InheritanceFlags]::ObjectInherit
+  } else { [Security.AccessControl.InheritanceFlags]::None }
+  foreach ($allowed in @($current, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
+    $grant = [Security.AccessControl.FileSystemAccessRule]::new(
+      $allowed,
+      [Security.AccessControl.FileSystemRights]::FullControl,
+      $inheritance,
+      [Security.AccessControl.PropagationFlags]::None,
+      [Security.AccessControl.AccessControlType]::Allow
+    )
+    [void]$acl.AddAccessRule($grant)
+  }
+  Set-Acl -LiteralPath $path -AclObject $acl
+}
+"""
+    result = subprocess.run(
+        [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        input=json.dumps([str(path) for path in paths]),
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise OSError("unable to secure private Imprint state on Windows")
+
+
 def secure_directory(path: Path) -> Path:
     """Create or tighten an Imprint-owned directory without following links."""
     target = Path(path)
     if target.is_symlink():
         raise OSError(f"refusing symlinked private directory: {target}")
     target.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
-    if os.name != "nt":
+    if os.name == "nt":
+        _secure_windows_paths([target])
+    else:
         os.chmod(target, PRIVATE_DIRECTORY_MODE, follow_symlinks=False)
     return target
 
@@ -29,14 +84,26 @@ def secure_file(path: Path) -> Path:
     target = Path(path)
     if target.is_symlink() or not target.is_file():
         raise OSError(f"private file is not a regular file: {target}")
-    if os.name != "nt":
+    if os.name == "nt":
+        _secure_windows_paths([target])
+    else:
         os.chmod(target, PRIVATE_FILE_MODE, follow_symlinks=False)
     return target
 
 
 def secure_tree(root: Path) -> None:
     """Tighten every existing item in an Imprint-owned state tree."""
-    base = secure_directory(root)
+    base = Path(root)
+    if base.is_symlink():
+        raise OSError(f"refusing symlinked private directory: {base}")
+    base.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
+    if os.name == "nt":
+        candidates = [base, *base.rglob("*")]
+        if any(path.is_symlink() or not (path.is_dir() or path.is_file()) for path in candidates):
+            raise OSError("refusing unsafe private state path")
+        _secure_windows_paths(candidates)
+        return
+    secure_directory(base)
     for current, directories, files in os.walk(base, followlinks=False):
         current_path = Path(current)
         secure_directory(current_path)
