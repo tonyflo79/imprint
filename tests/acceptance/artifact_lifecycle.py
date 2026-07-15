@@ -22,6 +22,7 @@ from imprint.portability.migrations import Migration, MigrationRunner
 from imprint.projections import jsonld_document
 from imprint.purge import hard_purge, preview_purge
 from imprint.retrieve import RetrievalEngine, StoreRetrievalSource
+from imprint.retrieve.receipts import DeliveryReceipts
 from imprint.store import ImprintStore
 
 
@@ -96,31 +97,42 @@ def main() -> int:
     )
     assert verdict_id in {item["node_id"] for item in store.current_nodes()}
 
+    delivery = DeliveryReceipts(operator_root / "runtime" / "delivery")
+    state, cached = delivery.prepare_delivery(
+        "acceptance-session", "acceptance-snapshot", None,
+        {"payload": "bounded response", "budget_bytes": 64},
+    )
+    assert state == "prepared" and cached is not None
+    assert delivery.commit_delivery("acceptance-session", "acceptance-snapshot", None)
+
     executable = Path(sys.executable).with_name("imprint.exe" if os.name == "nt" else "imprint")
     installed_env = dict(os.environ, IMPRINT_CONFIG=str(args.config))
+    def assert_healthy_private_state() -> None:
+        health = subprocess.run(
+            [str(executable), "health"], text=True, capture_output=True,
+            env=installed_env, check=False,
+        )
+        if health.returncode != 0 and os.name == "nt":
+            permission_probe = subprocess.run([
+                sys.executable, "-c",
+                "from pathlib import Path; from imprint.permissions import unsafe_windows_permissions; "
+                "import sys; print(unsafe_windows_permissions(Path(sys.argv[1])))",
+                str(operator_root),
+            ], text=True, capture_output=True, env=installed_env, check=False)
+            raise AssertionError(
+                health.stdout + health.stderr + "\npermission_probe="
+                + permission_probe.stdout + permission_probe.stderr
+            )
+        assert health.returncode == 0, health.stdout + health.stderr
+        assert json.loads(health.stdout)["status"] == "healthy"
+
     projection = operator_root / "projections" / "imprint.jsonld"
     exported = subprocess.run(
         [str(executable), "export", "--format", "jsonld", "--output", str(projection)],
         text=True, capture_output=True, env=installed_env, check=False,
     )
     assert exported.returncode == 0, exported.stdout + exported.stderr
-    health = subprocess.run(
-        [str(executable), "health"], text=True, capture_output=True,
-        env=installed_env, check=False,
-    )
-    if health.returncode != 0 and os.name == "nt":
-        permission_probe = subprocess.run([
-            sys.executable, "-c",
-            "from pathlib import Path; from imprint.permissions import unsafe_windows_permissions; "
-            "import sys; print(unsafe_windows_permissions(Path(sys.argv[1])))",
-            str(operator_root),
-        ], text=True, capture_output=True, env=installed_env, check=False)
-        raise AssertionError(
-            health.stdout + health.stderr + "\npermission_probe="
-            + permission_probe.stdout + permission_probe.stderr
-        )
-    assert health.returncode == 0, health.stdout + health.stderr
-    assert json.loads(health.stdout)["status"] == "healthy"
+    assert_healthy_private_state()
 
     # Migration runner must fail closed on a destructive statement.
     try:
@@ -199,6 +211,7 @@ def main() -> int:
     )
     assert purge["status"] == "purged", purge
     assert store.current_nodes() == []
+    assert_healthy_private_state()
     sentinel = operator_root / "acceptance-data-sentinel.txt"
     sentinel.write_text("preserve-me\n", encoding="utf-8")
     print(json.dumps({"status": "ok", "sentinel": str(sentinel)}, sort_keys=True))

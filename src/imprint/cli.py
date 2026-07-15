@@ -67,6 +67,7 @@ def _operator_urn(root: Path) -> str:
     """Create one local opaque operator identity without deriving personal data."""
     target = root / "identity.json"
     if target.exists():
+        secure_file(target)
         value = json.loads(target.read_text(encoding="utf-8"))
         if isinstance(value, dict) and str(value.get("operator_id", "")).startswith("urn:imprint:operator:"):
             return str(value["operator_id"])
@@ -80,6 +81,7 @@ def _operator_urn(root: Path) -> str:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+        secure_file(Path(temporary))
         try:
             os.chmod(temporary, 0o600)
         except OSError:
@@ -90,6 +92,7 @@ def _operator_urn(root: Path) -> str:
             return _operator_urn(root)
     finally:
         Path(temporary).unlink(missing_ok=True)
+    secure_file(target)
     return operator_id
 
 
@@ -97,6 +100,7 @@ def _session_key(root: Path) -> bytes:
     """Return an installation-local key without persisting provider session IDs."""
     target = root / "session-map.key"
     if target.exists():
+        secure_file(target)
         try:
             encoded = target.read_text(encoding="ascii").strip()
             key = bytes.fromhex(encoded)
@@ -113,6 +117,7 @@ def _session_key(root: Path) -> bytes:
             handle.write(encoded + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        secure_file(Path(temporary))
         try:
             os.chmod(temporary, 0o600)
         except OSError:
@@ -123,6 +128,7 @@ def _session_key(root: Path) -> bytes:
             return _session_key(root)
     finally:
         Path(temporary).unlink(missing_ok=True)
+    secure_file(target)
     return bytes.fromhex(encoded)
 
 

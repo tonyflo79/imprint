@@ -71,11 +71,24 @@ def secure_directory(path: Path) -> Path:
     target = Path(path)
     if target.is_symlink():
         raise OSError(f"refusing symlinked private directory: {target}")
+    missing: list[Path] = []
+    cursor = target
+    while not cursor.exists():
+        if cursor.is_symlink():
+            raise OSError(f"refusing symlinked private directory: {cursor}")
+        missing.append(cursor)
+        parent = cursor.parent
+        if parent == cursor:
+            break
+        cursor = parent
     target.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
+    created = list(reversed(missing))
+    candidates = created if created else [target]
     if os.name == "nt":
-        _secure_windows_paths([target])
+        _secure_windows_paths(candidates)
     else:
-        os.chmod(target, PRIVATE_DIRECTORY_MODE, follow_symlinks=False)
+        for candidate in candidates:
+            os.chmod(candidate, PRIVATE_DIRECTORY_MODE, follow_symlinks=False)
     return target
 
 

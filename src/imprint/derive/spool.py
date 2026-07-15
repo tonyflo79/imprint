@@ -11,13 +11,14 @@ from typing import Any, Mapping
 
 from imprint.errors import ConflictError, SafetyError, ValidationError
 from imprint.ontology.schema import canonical_bytes, payload_sha256
+from imprint.permissions import secure_directory, secure_file
 from imprint.store import ImprintStore
 
 from .proposals import validate_proposal
 
 
 def _safe_directory(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+    secure_directory(path)
     if path.is_symlink() or not path.is_dir():
         raise SafetyError("proposal spool directory must be a real directory")
 
@@ -27,6 +28,7 @@ def _immutable_write(path: Path, content: bytes) -> str:
     if path.exists():
         if path.is_symlink() or not path.is_file():
             raise SafetyError("proposal spool target is not a regular file")
+        secure_file(path)
         if path.read_bytes() == content:
             return "duplicate"
         raise ConflictError("proposal spool identity already contains different bytes")
@@ -36,6 +38,7 @@ def _immutable_write(path: Path, content: bytes) -> str:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
+        secure_file(Path(temporary))
         try:
             os.chmod(temporary, 0o600)
         except OSError:
@@ -46,6 +49,7 @@ def _immutable_write(path: Path, content: bytes) -> str:
             return _immutable_write(path, content)
     finally:
         Path(temporary).unlink(missing_ok=True)
+    secure_file(path)
     return "written"
 
 

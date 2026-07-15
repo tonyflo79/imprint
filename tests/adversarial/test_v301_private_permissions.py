@@ -56,6 +56,18 @@ def test_secure_helpers_refuse_symlinks(tmp_path):
         secure_file(file_link)
 
 
+def test_secure_directory_hardens_new_parent_chain(tmp_path):
+    root = tmp_path / "private" / "runtime" / "receipts"
+    prior = os.umask(0)
+    try:
+        secure_directory(root)
+    finally:
+        os.umask(prior)
+    assert _mode(tmp_path / "private") == 0o700
+    assert _mode(tmp_path / "private" / "runtime") == 0o700
+    assert _mode(root) == 0o700
+
+
 def test_capture_compile_and_backup_remain_private_under_permissive_umask(
     tmp_path, capture_envelope,
 ):

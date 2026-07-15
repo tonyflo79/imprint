@@ -9,7 +9,7 @@ import re
 import tempfile
 from pathlib import Path
 
-from imprint.permissions import secure_directory
+from imprint.permissions import secure_directory, secure_file
 
 _SAFE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 
@@ -43,10 +43,13 @@ class DeliveryReceipts:
                 handle.write(receipt)
                 handle.flush()
                 os.fsync(handle.fileno())
+            secure_file(Path(temporary))
             try:
                 os.link(temporary, final)
+                secure_file(final)
                 return True
             except FileExistsError:
+                secure_file(final)
                 return False
         finally:
             try:
@@ -100,8 +103,10 @@ class DeliveryReceipts:
         """
         pending, final = self._paths(session_id, snapshot_id, domain_id)
         if final.exists():
+            secure_file(final)
             return "delivered", None
         if pending.exists():
+            secure_file(pending)
             return "prepared", self._decode_prepared(pending)
         canonical = json.dumps(
             response, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -118,6 +123,7 @@ class DeliveryReceipts:
                 handle.write(envelope)
                 handle.flush()
                 os.fsync(handle.fileno())
+            secure_file(temporary)
             try:
                 os.link(temporary, pending)
             except FileExistsError:
@@ -127,6 +133,7 @@ class DeliveryReceipts:
         if final.exists():
             pending.unlink(missing_ok=True)
             return "delivered", None
+        secure_file(pending)
         return "prepared", self._decode_prepared(pending)
 
     def commit_delivery(
@@ -135,10 +142,13 @@ class DeliveryReceipts:
         """Atomically consume the latch only after a complete response is cached."""
         pending, final = self._paths(session_id, snapshot_id, domain_id)
         if final.exists():
+            secure_file(final)
             return False
+        secure_file(pending)
         self._decode_prepared(pending)
         try:
             os.link(pending, final)
+            secure_file(final)
             try:
                 pending.unlink(missing_ok=True)
             except OSError:

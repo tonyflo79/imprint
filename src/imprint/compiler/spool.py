@@ -39,6 +39,7 @@ def _write_lock_owner(path: Path, owner: dict[str, Any]) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
+        secure_file(temporary)
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -169,6 +170,7 @@ def recover_stale_compiler_lock(operator_root: Path, *, confirmation: str) -> di
     except OSError as exc:
         raise SafetyError("compiler lock changed before recovery claim") from exc
     try:
+        secure_tree(claimed)
         after = claimed.stat(follow_symlinks=False)
         owner_after = (claimed / "owner.json").read_bytes() if (claimed / "owner.json").is_file() else None
         claimed_state = _compiler_lock_directory_state(claimed)
@@ -192,6 +194,7 @@ def recover_stale_compiler_lock(operator_root: Path, *, confirmation: str) -> di
         if claimed.exists() and not lock.exists():
             try:
                 os.replace(claimed, lock)
+                secure_tree(lock)
             except OSError:
                 pass
         raise
@@ -241,6 +244,7 @@ def _quarantine_receipt(operator_root: Path, path: Path, error: Exception) -> No
         "content_included": False,
     }, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
     if final.exists():
+        secure_file(final)
         return
     fd, temporary = tempfile.mkstemp(prefix=".quarantine-", dir=directory)
     try:
@@ -248,6 +252,7 @@ def _quarantine_receipt(operator_root: Path, path: Path, error: Exception) -> No
             handle.write(body)
             handle.flush()
             os.fsync(handle.fileno())
+        secure_file(Path(temporary))
         try:
             os.link(temporary, final)
         except FileExistsError:
@@ -289,6 +294,7 @@ def _write_acknowledgement(
         return all(prior.get(key) == body[key] for key in stable)
 
     if target.exists():
+        secure_file(target)
         if not matches_prior():
             raise ConflictError("acknowledgement identity conflicts with committed input")
         return
@@ -299,6 +305,7 @@ def _write_acknowledgement(
             handle.write(json.dumps(body, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
+        secure_file(temporary)
         try:
             os.link(temporary, target)
         except FileExistsError:
@@ -370,6 +377,7 @@ def write_envelope(operator_root: Path, envelope: dict[str, Any]) -> Path:
     final = spool / f"{event_id}.json"
     data = canonical_bytes(envelope) + b"\n"
     if final.exists():
+        secure_file(final)
         if final.read_bytes() == data:
             return final
         raise ConflictError("same spool event path contains different bytes")
@@ -380,6 +388,7 @@ def write_envelope(operator_root: Path, envelope: dict[str, Any]) -> Path:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
+        secure_file(temp)
         os.replace(temp, final)
     finally:
         temp.unlink(missing_ok=True)
@@ -398,6 +407,7 @@ def compile_spools(operator_root: Path, store: ImprintStore, *, compiler_authori
     except FileExistsError as exc:
         state = compiler_lock_state(operator_root)
         raise SafetyError(f"compiler lock already held; refusing a second writer; state={state['state']} nonce={state.get('nonce','unknown')}") from exc
+    secure_directory(lock)
     try:
         owner = {
             "lock_schema_version": "1.0.0", "nonce": nonce, "pid": os.getpid(),
