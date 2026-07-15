@@ -19,9 +19,11 @@ from imprint.errors import ValidationError
 from imprint.ingest import IngestCandidate, IngestService
 from imprint.portability import export_jsonld, import_jsonld
 from imprint.portability.migrations import Migration, MigrationRunner
+from imprint.permissions import unsafe_private_permissions
 from imprint.projections import jsonld_document
 from imprint.purge import hard_purge, preview_purge
 from imprint.retrieve import RetrievalEngine, StoreRetrievalSource
+from imprint.retrieve.receipts import DeliveryReceipts
 from imprint.store import ImprintStore
 
 
@@ -41,7 +43,7 @@ def main() -> int:
         call_type="correct",
         reason="Silent omission corrupts the decision.",
         capture_mechanism="explicit_cli",
-        captured_by="artifact-acceptance/3.0.0",
+        captured_by="artifact-acceptance/3.0.1",
         chosen_alternatives=["Report the failed source"],
         rejected_alternatives=["Omit the failure"],
     )
@@ -96,20 +98,42 @@ def main() -> int:
     )
     assert verdict_id in {item["node_id"] for item in store.current_nodes()}
 
+    delivery = DeliveryReceipts(operator_root / "runtime" / "delivery")
+    state, cached = delivery.prepare_delivery(
+        "acceptance-session", "acceptance-snapshot", None,
+        {"payload": "bounded response", "budget_bytes": 64},
+    )
+    assert state == "prepared" and cached is not None
+    assert delivery.commit_delivery("acceptance-session", "acceptance-snapshot", None)
+
     executable = Path(sys.executable).with_name("imprint.exe" if os.name == "nt" else "imprint")
     installed_env = dict(os.environ, IMPRINT_CONFIG=str(args.config))
+    def assert_healthy_private_state() -> None:
+        health = subprocess.run(
+            [str(executable), "health"], text=True, capture_output=True,
+            env=installed_env, check=False,
+        )
+        if health.returncode != 0 and os.name == "nt":
+            permission_probe = subprocess.run([
+                sys.executable, "-c",
+                "from pathlib import Path; from imprint.permissions import unsafe_windows_permissions; "
+                "import sys; print(unsafe_windows_permissions(Path(sys.argv[1])))",
+                str(operator_root),
+            ], text=True, capture_output=True, env=installed_env, check=False)
+            raise AssertionError(
+                health.stdout + health.stderr + "\npermission_probe="
+                + permission_probe.stdout + permission_probe.stderr
+            )
+        assert health.returncode == 0, health.stdout + health.stderr
+        assert json.loads(health.stdout)["status"] == "healthy"
+
     projection = operator_root / "projections" / "imprint.jsonld"
     exported = subprocess.run(
         [str(executable), "export", "--format", "jsonld", "--output", str(projection)],
         text=True, capture_output=True, env=installed_env, check=False,
     )
     assert exported.returncode == 0, exported.stdout + exported.stderr
-    health = subprocess.run(
-        [str(executable), "health"], text=True, capture_output=True,
-        env=installed_env, check=False,
-    )
-    assert health.returncode == 0, health.stdout + health.stderr
-    assert json.loads(health.stdout)["status"] == "healthy"
+    assert_healthy_private_state()
 
     # Migration runner must fail closed on a destructive statement.
     try:
@@ -158,13 +182,26 @@ def main() -> int:
         }), text=True, capture_output=True, env=env, check=False,
     )
     assert queued.returncode == 0, queued.stdout + queued.stderr
-    assert json.loads(queued.stdout)["status"] == "queued"
-    compiled = subprocess.run(
-        [str(executable), "compile", "--once"], text=True,
-        capture_output=True, env=env, check=False,
-    )
-    assert compiled.returncode == 0, compiled.stdout + compiled.stderr
-    assert json.loads(compiled.stdout)["captured"] == 1
+    queued_receipt = json.loads(queued.stdout)
+    assert queued_receipt["status"] == "queued"
+    assert queued_receipt["canonical_status"] == "compiled"
+    assert queued_receipt["compile"]["captured"] == 1
+
+    # Execute every installed bridge and verify its invalid-input failure policy.
+    install_root = executable.parents[2]
+    policies = {
+        "stop_capture.py": (2, "fail_closed"),
+        "session_start.py": (0, "fail_open"),
+        "user_prompt_submit.py": (0, "fail_open"),
+        "health_check.py": (0, "fail_open"),
+    }
+    for script, (expected_code, expected_policy) in policies.items():
+        bridged = subprocess.run(
+            [sys.executable, str(install_root / "hooks" / script)],
+            input="not-json", text=True, capture_output=True, env=env, check=False,
+        )
+        assert bridged.returncode == expected_code, bridged.stdout + bridged.stderr
+        assert json.loads(bridged.stdout)["failure_policy"] == expected_policy
 
     # Purge is its own acceptance boundary: exact confirmation and no active residue.
     preview = preview_purge(store, operator_root, operator)
@@ -175,6 +212,7 @@ def main() -> int:
     )
     assert purge["status"] == "purged", purge
     assert store.current_nodes() == []
+    assert unsafe_private_permissions(operator_root) == ()
     sentinel = operator_root / "acceptance-data-sentinel.txt"
     sentinel.write_text("preserve-me\n", encoding="utf-8")
     print(json.dumps({"status": "ok", "sentinel": str(sentinel)}, sort_keys=True))

@@ -26,6 +26,7 @@ release/allowlist.txt
 tests/acceptance/artifact_lifecycle.py
 tests/acceptance/test_install_posix.sh
 tests/acceptance/test_install_windows.ps1
+tests/acceptance/test_upgrade_from_v300.sh
 tools/install/install_ownership.py
 tools/install/manage_hooks.py
 tools/release/extract_safe.py

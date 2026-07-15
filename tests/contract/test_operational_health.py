@@ -18,7 +18,7 @@ def _config(root):
     }
 
 
-def test_health_reports_bare_lock_as_degraded_without_content(tmp_path):
+def test_health_reports_fresh_bare_lock_as_invalid_but_not_stale(tmp_path):
     root = tmp_path / "operator"
     root.mkdir()
     store = ImprintStore(root / "imprint.db")
@@ -26,7 +26,10 @@ def test_health_reports_bare_lock_as_degraded_without_content(tmp_path):
     (root / "compiler.lock").mkdir()
     report = health_report(root, store, _config(root))
     assert report["status"] == "degraded"
-    assert report["metrics"]["stale_lock_count"] == 1
+    assert report["metrics"]["stale_lock_count"] == 0
+    assert report["metrics"]["compiler_state"] == "invalid"
+    assert "compiler_lock_invalid" in report["degraded_reasons"]
+    assert "stale_lock_present" not in report["degraded_reasons"]
     encoded = json.dumps(report)
     assert str(root) not in encoded
 

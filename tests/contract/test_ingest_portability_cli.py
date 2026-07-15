@@ -54,7 +54,10 @@ def test_ingest_export_import_and_migrate_cli(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["status"] == "applicable"
     assert main(["--config", str(target_config), "migrate", "apply", "--spec", str(spec)]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "applied"
-    assert main(["--config", str(target_config), "migrate", "verify"]) == 0
-    verified = json.loads(capsys.readouterr().out)
-    assert verified["store_schema_version"] == "3.0.1"
-    assert verified["migrations"][0]["migration_id"] == "3.0.0-cli-labels"
+    # The additive migration is durable, but this 3.0.0 storage engine must not
+    # continue ordinary operation against a newly labeled 3.0.1 store. A binary
+    # that explicitly supports that target version is required to reopen it.
+    assert main(["--config", str(target_config), "migrate", "verify"]) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["error_type"] == "ValidationError"
+    assert "incompatible store schema" in refused["error"]

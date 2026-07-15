@@ -4,6 +4,7 @@ param(
     [string]$Config = $(if ($env:IMPRINT_CONFIG) { $env:IMPRINT_CONFIG } else { Join-Path $env:APPDATA "Imprint\config.json" }),
     [string]$Settings = $(if ($env:CLAUDE_SETTINGS_PATH) { $env:CLAUDE_SETTINGS_PATH } else { Join-Path $env:USERPROFILE ".claude\settings.json" }),
     [string]$DataRoot = $(if ($env:IMPRINT_DATA_ROOT) { $env:IMPRINT_DATA_ROOT } else { Join-Path $env:LOCALAPPDATA "Imprint" }),
+    [string]$LauncherDir = $(if ($env:IMPRINT_LAUNCHER_DIR) { $env:IMPRINT_LAUNCHER_DIR } else { Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps" }),
     [string]$Operator = "default",
     [string]$Python = "python",
     [switch]$NoHooks
@@ -12,23 +13,57 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ArtifactRoot = Split-Path -Parent $ScriptDir
 
+function Set-PrivateAcl([string]$Path) {
+    $Sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $Item = Get-Item $Path -Force
+    & icacls.exe $Path /setowner "*$Sid" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Unable to set the private Imprint path owner: $Path" }
+    $Acl = Get-Acl -LiteralPath $Path
+    $Acl.SetAccessRuleProtection($true, $false)
+    foreach ($Rule in @($Acl.Access)) { [void]$Acl.RemoveAccessRuleSpecific($Rule) }
+    $Inheritance = if ($Item.PSIsContainer) {
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else { [Security.AccessControl.InheritanceFlags]::None }
+    foreach ($AllowedSid in @($Sid, "S-1-5-18")) {
+        $Identity = [Security.Principal.SecurityIdentifier]::new($AllowedSid)
+        $Grant = [Security.AccessControl.FileSystemAccessRule]::new(
+            $Identity,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $Inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$Acl.AddAccessRule($Grant)
+    }
+    Set-Acl -LiteralPath $Path -AclObject $Acl
+}
+
 if ($Operator -notmatch '^[a-z0-9][a-z0-9-]*$') { throw "Operator must use lowercase letters, digits, and hyphens." }
-& $Python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 'Imprint requires Python 3.10+')"
+& $Python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 'Imprint requires Python 3.10 or newer')"
 if ($LASTEXITCODE -ne 0) { throw "Python 3.10 or newer is required." }
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $VolumeRoot = [IO.Path]::GetPathRoot($InstallRoot)
 if ($InstallRoot -eq $VolumeRoot -or $InstallRoot -eq [IO.Path]::GetFullPath($env:USERPROFILE)) { throw "Refusing an unsafe install root: $InstallRoot" }
 $Marker = Join-Path $InstallRoot ".imprint-install-root"
+$Launcher = Join-Path ([IO.Path]::GetFullPath($LauncherDir)) "imprint.cmd"
+$ExistingVersion = $null
 if (Test-Path $InstallRoot) {
     $item = Get-Item $InstallRoot -Force
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Refusing a reparse-point install root: $InstallRoot" }
     $children = @(Get-ChildItem $InstallRoot -Force)
-    if ($children.Count -gt 0 -and ((-not (Test-Path $Marker -PathType Leaf)) -or (Get-Content -Raw $Marker) -ne "imprint-local:3.0.0`n")) {
-        throw "Refusing a non-empty install root not owned by Imprint: $InstallRoot"
+    if ($children.Count -gt 0) {
+        if (-not (Test-Path $Marker -PathType Leaf)) { throw "Refusing a non-empty install root not owned by Imprint: $InstallRoot" }
+        $MarkerText = Get-Content -Raw $Marker
+        if ($MarkerText -eq "imprint-local:3.0.0`n") { $ExistingVersion = "3.0.0" }
+        elseif ($MarkerText -eq "imprint-local:3.0.1`n") { $ExistingVersion = "3.0.1" }
+        else { throw "Refusing an unsupported Imprint install version: $MarkerText" }
+        & $Python (Join-Path $ArtifactRoot "tools\install\install_ownership.py") verify --root $InstallRoot --expected-version $ExistingVersion
+        if ($LASTEXITCODE -ne 0) { throw "Existing installation ownership verification failed." }
     }
 }
-$Wheel = Get-ChildItem -Path (Join-Path $ArtifactRoot "dist") -Filter "imprint_local-3.0.0-*.whl" | Select-Object -First 1
-if (-not $Wheel) { throw "The release artifact is incomplete: dist/imprint_local-3.0.0-*.whl is missing." }
+$Wheel = Get-ChildItem -Path (Join-Path $ArtifactRoot "dist") -Filter "imprint_local-3.0.1-*.whl" | Select-Object -First 1
+if (-not $Wheel) { throw "The release artifact is incomplete: dist/imprint_local-3.0.1-*.whl is missing." }
 
 $StateRoot = Join-Path ([IO.Path]::GetTempPath()) ("imprint-install-state-" + [guid]::NewGuid())
 $BackupRoot = "$InstallRoot.imprint-backup.$PID"
@@ -42,12 +77,34 @@ function Restore-StateFile([string]$Path, [string]$Name) {
     if (Test-Path (Join-Path $StateRoot "$Name.absent")) { Remove-Item $Path -Force -ErrorAction SilentlyContinue }
     else { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null; Copy-Item -Force (Join-Path $StateRoot $Name) $Path }
 }
+function Save-PathAcl([string]$Path, [string]$Name) {
+    if (Test-Path $Path) { [IO.File]::WriteAllText((Join-Path $StateRoot "$Name.acl.sddl"), (Get-Acl -LiteralPath $Path).Sddl, [Text.Encoding]::ASCII) }
+    else { New-Item -ItemType File -Path (Join-Path $StateRoot "$Name.acl.absent") | Out-Null }
+}
+function Restore-PathAcl([string]$Path, [string]$Name) {
+    $Saved = Join-Path $StateRoot "$Name.acl.sddl"
+    if ((Test-Path $Saved -PathType Leaf) -and (Test-Path $Path)) {
+        $Acl = Get-Acl -LiteralPath $Path
+        $Acl.SetSecurityDescriptorSddlForm([IO.File]::ReadAllText($Saved, [Text.Encoding]::ASCII))
+        Set-Acl -LiteralPath $Path -AclObject $Acl
+    } elseif ((Test-Path (Join-Path $StateRoot "$Name.acl.absent") -PathType Leaf) -and (Test-Path $Path -PathType Container)) {
+        Remove-Item $Path -ErrorAction SilentlyContinue
+    }
+}
 Save-StateFile $Config "config"
 Save-StateFile $Settings "settings"
+Save-StateFile $Launcher "launcher"
+Save-PathAcl $Config "config"
+Save-PathAcl (Split-Path -Parent $Config) "config-parent"
+Save-PathAcl $DataRoot "data-root"
 $Succeeded = $false
 try {
-    if (Test-Path $InstallRoot) { Move-Item $InstallRoot $BackupRoot }
+    if (Test-Path $InstallRoot) {
+        if ($ExistingVersion) { Move-Item $InstallRoot $BackupRoot } else { Remove-Item $InstallRoot }
+    }
     New-Item -ItemType Directory -Force -Path $InstallRoot, (Split-Path -Parent $Config), $DataRoot | Out-Null
+    Set-PrivateAcl (Split-Path -Parent $Config)
+    Set-PrivateAcl $DataRoot
     & $Python -m venv (Join-Path $InstallRoot "venv")
     if ($LASTEXITCODE -ne 0) { throw "Unable to create the isolated Imprint environment." }
     $VenvPython = Join-Path $InstallRoot "venv\Scripts\python.exe"
@@ -77,30 +134,47 @@ try {
     $TempConfig = "$Config.imprint-tmp"
     $ConfigValue | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 $TempConfig
     Move-Item -Force $TempConfig $Config
+    Set-PrivateAcl $Config
 
     if (-not $NoHooks) {
         & $VenvPython (Join-Path $ToolTarget "manage_hooks.py") register --settings $Settings --python $VenvPython --hooks-dir $HookTarget
         if ($LASTEXITCODE -ne 0) { throw "Managed hook registration failed." }
     }
+    if (Test-Path $Launcher) {
+        $LauncherItem = Get-Item $Launcher -Force
+        $LauncherText = if ($LauncherItem.PSIsContainer) { "" } else { Get-Content -Raw $Launcher }
+        if (($LauncherItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $LauncherText -notmatch '(?m)^rem imprint-local-owned-launcher:3\.0\.1\r?$') {
+            throw "Refusing to replace an unowned launcher: $Launcher"
+        }
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Launcher) | Out-Null
     $env:IMPRINT_CONFIG = $Config
     $Imprint = Join-Path $InstallRoot "venv\Scripts\imprint.exe"
+    $LauncherBody = "@echo off`r`nrem imprint-local-owned-launcher:3.0.1`r`nset `"IMPRINT_CONFIG=$Config`"`r`n`"$Imprint`" %*`r`n"
+    [IO.File]::WriteAllText($Launcher, $LauncherBody, [Text.Encoding]::ASCII)
     $Version = & $Imprint version
-    if ($LASTEXITCODE -ne 0 -or $Version -ne "3.0.0") { throw "Installed Imprint failed its version check." }
+    if ($LASTEXITCODE -ne 0 -or $Version -ne "3.0.1") { throw "Installed Imprint failed its version check." }
+    $Version = & $Launcher version
+    if ($LASTEXITCODE -ne 0 -or $Version -ne "3.0.1") { throw "Installed launcher failed its version check." }
     $Ownership = Join-Path $ToolTarget "install_ownership.py"
     & $VenvPython $Ownership record --root $InstallRoot
     if ($LASTEXITCODE -ne 0) { throw "Unable to record installed-file ownership." }
     if (Test-Path $BackupRoot) {
-        & $VenvPython $Ownership uninstall --root $BackupRoot
+        & $VenvPython $Ownership uninstall --root $BackupRoot --expected-version $ExistingVersion
         if ($LASTEXITCODE -ne 0) { throw "Unable to remove the verified previous installation." }
     }
-    [IO.File]::WriteAllText($Marker, "imprint-local:3.0.0`n", [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText($Marker, "imprint-local:3.0.1`n", [Text.Encoding]::ASCII)
     $Succeeded = $true
-    Write-Host "Imprint 3.0.0 installed. Data root: $DataRoot. No telemetry is enabled."
+    Write-Host "Imprint 3.0.1 installed. Launcher: $Launcher. Data root: $DataRoot. No telemetry is enabled."
 } catch {
     if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
     if (Test-Path $BackupRoot) { Move-Item $BackupRoot $InstallRoot }
     Restore-StateFile $Config "config"
     Restore-StateFile $Settings "settings"
+    Restore-StateFile $Launcher "launcher"
+    Restore-PathAcl $Config "config"
+    Restore-PathAcl (Split-Path -Parent $Config) "config-parent"
+    Restore-PathAcl $DataRoot "data-root"
     throw
 } finally {
     Remove-Item $StateRoot -Recurse -Force -ErrorAction SilentlyContinue

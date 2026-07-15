@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -9,6 +11,7 @@ from imprint.compiler import (
     compile_spools, compiler_lock_state, prune_acknowledged_spools,
     recover_stale_compiler_lock, write_envelope,
 )
+from imprint.compiler.spool import LOCK_STALE_SECONDS
 from imprint.constants import ONTOLOGY_SCHEMA_VERSION
 from imprint.errors import ConflictError, SafetyError, ValidationError
 from imprint.capture.schema import validate_capture_envelope
@@ -177,7 +180,10 @@ def test_compiler_lock_state_and_exact_nonce_stale_recovery(tmp_path, monkeypatc
     lock = root / "compiler.lock"
     lock.mkdir(parents=True)
     assert compiler_lock_state(root)["state"] == "invalid"
-    with pytest.raises(SafetyError, match="exact owner nonce"):
+    assert compiler_lock_state(root)["stale"] is False
+    old_mtime = time.time() - LOCK_STALE_SECONDS - 2
+    os.utime(lock, (old_mtime, old_mtime))
+    with pytest.raises(SafetyError, match="RECOVER-INVALID-LOCK"):
         recover_stale_compiler_lock(root, confirmation="anything")
 
     nonce = "a" * 32
@@ -449,10 +455,7 @@ def test_semantic_observation_requires_matching_durable_consent(tmp_path, captur
     unauthorized_target = ImprintStore(tmp_path / "unauthorized-import.db")
     with pytest.raises(ValidationError, match="does not authorize imported"):
         import_jsonld(unauthorized_target, unauthorized)
-    with unauthorized_target.connect() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'"
-        ).fetchone()[0] == 0
+    assert not unauthorized_target.path.exists()
 
     event_mismatch = json.loads(json.dumps(portable))
     observation_version = next(

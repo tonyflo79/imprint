@@ -156,11 +156,7 @@ def test_jsonld_revalidates_typed_rows_and_rolls_back_graph_mismatch(tmp_path, c
     target = ImprintStore(tmp_path / "invalid-payload.db")
     with pytest.raises(ValidationError):
         import_jsonld(target, invalid_payload)
-    with target.connect() as conn:
-        events_exists = conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'"
-        ).fetchone()[0]
-        assert events_exists == 0
+    assert not target.path.exists()
 
     graph_mismatch = deepcopy(document)
     graph_mismatch["@graph"][0]["imprint:payload"] = {"tampered": True}
@@ -168,11 +164,7 @@ def test_jsonld_revalidates_typed_rows_and_rolls_back_graph_mismatch(tmp_path, c
     target = ImprintStore(tmp_path / "graph-mismatch.db")
     with pytest.raises(ValidationError, match="graph does not match"):
         import_jsonld(target, graph_mismatch)
-    with target.connect() as conn:
-        events_exists = conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'"
-        ).fetchone()[0]
-        assert events_exists == 0
+    assert not target.path.exists()
 
 
 def test_ratified_business_relationship_requires_endpoint_operator(tmp_path, capture_envelope):

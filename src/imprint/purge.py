@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -11,12 +13,31 @@ from .constants import STORE_SCHEMA_VERSION
 from .errors import SafetyError, ValidationError
 from .ontology.schema import make_urn
 from .paths import validate_data_root
+from .permissions import secure_directory, secure_file, secure_tree
 from .projections import jsonld_document, markdown_document
 from .store import ImprintStore
 from .store.service import utc_now
 
 
 OWNED_CONTENT_DIRS = ("spool", "runtime", "projections", "exports", "backups", "quarantine")
+
+
+def _write_private_text(path: Path, content: str) -> None:
+    secure_directory(path.parent)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
+    temporary = Path(temporary_name)
+    os.close(fd)
+    try:
+        secure_file(temporary)
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        secure_file(temporary)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    secure_file(path)
 
 
 def _closure(conn: sqlite3.Connection, scope: str) -> tuple[set[str], set[str], set[str], set[str], str]:
@@ -254,13 +275,16 @@ def hard_purge(
     finally:
         connection.close()
     projection_dir = root / "projections"
-    projection_dir.mkdir(parents=True, exist_ok=True)
+    secure_directory(projection_dir)
     snapshot = store.snapshot()
-    (projection_dir / "imprint.md").write_text(markdown_document(snapshot), encoding="utf-8")
-    (projection_dir / "imprint.jsonld").write_text(
+    markdown_path = projection_dir / "imprint.md"
+    jsonld_path = projection_dir / "imprint.jsonld"
+    _write_private_text(markdown_path, markdown_document(snapshot))
+    _write_private_text(
+        jsonld_path,
         json.dumps(jsonld_document(snapshot), ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-        encoding="utf-8",
     )
+    secure_tree(root)
     markers = [scope.encode("utf-8")]
     if sentinel:
         markers.append(sentinel.encode("utf-8"))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,61 @@ DEFAULTS = {
 # unless namespaced with a dot, which reserves an extension space the loader
 # preserves but does not interpret.
 KNOWN_TOP_LEVEL = frozenset(DEFAULTS) | {"data_root", "hooks_dir"}
+SAFE_LOCAL_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+
+
+def _is_int(value: Any) -> bool:
+    """JSON booleans are Python integers, but never valid numeric settings."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_config(data: dict[str, Any]) -> None:
+    if not isinstance(data.get("config_version"), str) or data["config_version"] != DEFAULTS["config_version"]:
+        raise ValidationError("unsupported config_version")
+    for field in ("operator_slug", "node_id"):
+        value = data.get(field)
+        if not isinstance(value, str) or SAFE_LOCAL_ID.fullmatch(value) is None:
+            raise ValidationError(f"{field} must be a safe lowercase identifier")
+    for field in ("compiler", "allow_higher_budget"):
+        if not isinstance(data.get(field), bool):
+            raise ValidationError(f"{field} must be a boolean")
+    if not _is_int(data.get("context_budget_bytes")) or not 4096 <= data["context_budget_bytes"] <= 131072:
+        raise ValidationError("context_budget_bytes must be 4096..131072")
+    if data["context_budget_bytes"] > 32768 and data["allow_higher_budget"] is not True:
+        raise ValidationError("context_budget_bytes above 32768 requires allow_higher_budget=true")
+    if not _is_int(data.get("spool_retention_days")) or not 1 <= data["spool_retention_days"] <= 36500:
+        raise ValidationError("spool_retention_days must be 1..36500")
+    if not isinstance(data.get("domains"), list):
+        raise ValidationError("domains must be an array")
+    domain_fields = {"domain_id", "public_label", "safe_paths", "keywords", "frozen"}
+    for domain in data["domains"]:
+        if not isinstance(domain, dict) or not {"domain_id", "public_label"}.issubset(domain):
+            raise ValidationError("each domain must be an object with domain_id and public_label")
+        if set(domain) - domain_fields:
+            raise ValidationError("domain config contains unknown fields")
+        if not isinstance(domain["domain_id"], str) or SAFE_LOCAL_ID.fullmatch(domain["domain_id"]) is None:
+            raise ValidationError("domain_id must be a safe lowercase identifier")
+        if not isinstance(domain["public_label"], str) or not domain["public_label"].strip():
+            raise ValidationError("domain public_label must be a non-empty string")
+        for field in ("safe_paths", "keywords"):
+            value = domain.get(field, [])
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise ValidationError(f"domain {field} must be an array of strings")
+        if "frozen" in domain and not isinstance(domain["frozen"], bool):
+            raise ValidationError("domain frozen must be a boolean")
+    experimental = data.get("experimental")
+    expected_experimental = frozenset(DEFAULTS["experimental"])
+    if not isinstance(experimental, dict) or set(experimental) != expected_experimental:
+        raise ValidationError("experimental must contain exactly digest and profile_learning")
+    if any(not isinstance(experimental[field], bool) for field in expected_experimental):
+        raise ValidationError("experimental settings must be booleans")
+    for field in ("data_root", "hooks_dir"):
+        if field in data and (not isinstance(data[field], str) or not data[field].strip()):
+            raise ValidationError(f"{field} must be a non-empty path string")
+    if "hooks_dir" in data:
+        hooks_dir = Path(data["hooks_dir"]).expanduser()
+        if not hooks_dir.is_absolute() or "\x00" in data["hooks_dir"]:
+            raise ValidationError("hooks_dir must be an absolute safe path")
 
 
 def config_path() -> Path:
@@ -55,14 +111,7 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
                 f"unknown config keys: {sorted(unknown)}; namespace extensions with a dot"
             )
         data.update(loaded)
-    if data.get("config_version") != DEFAULTS["config_version"]:
-        raise ValidationError("unsupported config_version")
-    if not isinstance(data.get("context_budget_bytes"), int) or not 4096 <= data["context_budget_bytes"] <= 131072:
-        raise ValidationError("context_budget_bytes must be 4096..131072")
-    if data["context_budget_bytes"] > 32768 and data.get("allow_higher_budget") is not True:
-        raise ValidationError("context_budget_bytes above 32768 requires allow_higher_budget=true")
-    if not isinstance(data.get("spool_retention_days"), int) or not 1 <= data["spool_retention_days"] <= 36500:
-        raise ValidationError("spool_retention_days must be 1..36500")
+    _validate_config(data)
     try:
         from .domains import registry_from_config
         registry_from_config(data)

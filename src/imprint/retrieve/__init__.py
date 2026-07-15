@@ -52,15 +52,16 @@ def retrieve_payload(store, *, root: Path, session_id: str, prompt: str = "", ex
     )
     if domain_only and not explicit_domain:
         raise ValueError("domain_only retrieval requires an explicit selected domain")
-    claimed = (
-        receipts.claim_domain(safe_session, snapshot_id, explicit_domain)
-        if domain_only and explicit_domain
-        else receipts.claim_session_start(safe_session, snapshot_id)
-    )
-    if not refresh and not claimed:
-        return {"status": "already_delivered", "snapshot_id": snapshot_id, "payload": "", "selected_ids": []}
+    receipt_domain = explicit_domain if domain_only else None
+    if not refresh:
+        pending, delivered = receipts._paths(safe_session, snapshot_id, receipt_domain)
+        if delivered.exists():
+            return {"status": "already_delivered", "snapshot_id": snapshot_id, "payload": "", "selected_ids": []}
+        if pending.exists():
+            cached = receipts._decode_prepared(pending)
+            return cached
     result = engine.retrieve(snapshot_id=snapshot_id, query=prompt, selected_domain=explicit_domain)
-    return {
+    response: dict[str, object] = {
         "status": "delivered",
         "snapshot_id": snapshot_id,
         "payload": result.payload.decode("utf-8"),
@@ -77,11 +78,31 @@ def retrieve_payload(store, *, root: Path, session_id: str, prompt: str = "", ex
             partition: list(ids) for partition, ids in result.selected_by_partition.items()
         },
     }
+    if refresh:
+        return response
+    state, cached = receipts.prepare_delivery(
+        safe_session, snapshot_id, receipt_domain, response,
+    )
+    if state == "delivered":
+        return {"status": "already_delivered", "snapshot_id": snapshot_id, "payload": "", "selected_ids": []}
+    assert cached is not None
+    return cached
+
+
+def commit_payload_delivery(
+    *, root: Path, session_id: str, snapshot_id: str, domain_id: str | None = None,
+) -> bool:
+    """Commit a prepared delivery only after its caller flushed the payload."""
+    safe_session = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
+    return DeliveryReceipts(Path(root) / "receipts").commit_delivery(
+        safe_session, snapshot_id, domain_id,
+    )
 
 __all__ = [
     "BUSINESS_DECLARED_PARTITION",
     "BUSINESS_OBSERVED_PARTITION",
     "CHOSEN_FUTURE_PARTITION",
+    "commit_payload_delivery",
     "DEFAULT_FUTURE_PARTITION",
     "AuthorityMode",
     "DeliveryReceipts",

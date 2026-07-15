@@ -20,8 +20,11 @@ class HealthInputs:
     oldest_spool_age_seconds: int = 0
     spool_stale_after_seconds: int = 3600
     quarantine_count: int = 0
+    permissions_ok: bool = True
+    unsafe_permission_count: int = 0
     selected_bytes: int = 0
     omitted_bytes: int = 0
+    retrieval_omitted_count: int = 0
     retrieval_budget_bytes: int = 32 * 1024
     higher_budget_explicit: bool = False
     record_schema_major: int = SUPPORTED_RECORD_MAJOR
@@ -33,10 +36,15 @@ class HealthInputs:
     migration_pending: bool = False
     projection_snapshot_present: bool = True
     last_compile_age_seconds: int = 0
+    last_retrieval_age_seconds: int = -1
     disk_free_bytes: int = 1
     stale_lock_count: int = 0
     abandoned_temp_count: int = 0
     backup_verified: bool = True
+    backup_restoreable: bool = True
+    verified_backup_count: int = 0
+    invalid_backup_count: int = 0
+    compiler_state: Literal["absent", "held", "invalid"] = "absent"
     optional_backend_state: Literal["disabled", "available", "unavailable"] = "disabled"
     network_state: Literal["offline", "idle", "transferred"] = "offline"
     last_transfer_age_seconds: int = -1
@@ -75,6 +83,10 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         reasons.append("hook_parity_failed")
     if values.spool_depth > 0 and values.oldest_spool_age_seconds > values.spool_stale_after_seconds:
         reasons.append("spool_stale")
+    if values.quarantine_count > 0:
+        reasons.append("quarantine_present")
+    if not values.permissions_ok or values.unsafe_permission_count > 0:
+        reasons.append("unsafe_permissions")
     if values.selected_bytes > values.retrieval_budget_bytes:
         reasons.append("retrieval_budget_violated")
     if values.retrieval_budget_bytes > 32 * 1024 and not values.higher_budget_explicit:
@@ -91,9 +103,11 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         reasons.append("disk_space_exhausted")
     if values.stale_lock_count > 0:
         reasons.append("stale_lock_present")
+    if values.compiler_state == "invalid":
+        reasons.append("compiler_lock_invalid")
     if values.abandoned_temp_count > 0:
         reasons.append("abandoned_temp_present")
-    if not values.backup_verified:
+    if not values.backup_verified or not values.backup_restoreable or values.invalid_backup_count > 0:
         reasons.append("backup_unverified")
     if values.experimental_enabled and values.experimental_state == "stalled":
         reasons.append("experimental_loop_stalled")
@@ -101,25 +115,39 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
     metrics: dict[str, int | bool | str] = {
         "compiler_count": values.compiler_count,
         "database_ok": values.database_ok,
+        "database_evidence": "sqlite_pragma_integrity_check",
         "abandoned_temp_count": max(0, values.abandoned_temp_count),
         "backup_verified": values.backup_verified,
+        "backup_restoreable": values.backup_restoreable,
+        "verified_backup_count": max(0, values.verified_backup_count),
+        "invalid_backup_count": max(0, values.invalid_backup_count),
+        "backup_evidence": "receipt_sha256_plus_sqlite_integrity_and_schema",
+        "compiler_state": values.compiler_state,
+        "compiler_evidence": "configured_authority_plus_compiler_lock",
         "disk_free_bytes": max(0, values.disk_free_bytes),
         "experimental_state": values.experimental_state,
         "higher_budget_explicit": values.higher_budget_explicit,
         "hook_parity_ok": values.hook_parity_ok,
+        "hook_evidence": "configured_hook_directory_required_sources",
         "migration_pending": values.migration_pending,
         "migrations_ok": values.migrations_ok,
-        "last_compile_age_seconds": max(0, values.last_compile_age_seconds),
+        "last_compile_age_seconds": max(-1, values.last_compile_age_seconds),
+        "last_retrieval_age_seconds": max(-1, values.last_retrieval_age_seconds),
         "last_transfer_age_seconds": values.last_transfer_age_seconds,
         "network_state": values.network_state,
         "oldest_spool_age_seconds": max(0, values.oldest_spool_age_seconds),
         "omitted_bytes": max(0, values.omitted_bytes),
+        "retrieval_omitted_count": max(0, values.retrieval_omitted_count),
         "quarantine_count": max(0, values.quarantine_count),
+        "permissions_ok": values.permissions_ok,
+        "unsafe_permission_count": max(0, values.unsafe_permission_count),
+        "permissions_evidence": "posix_mode_scan_or_platform_acl_contract",
         "optional_backend_state": values.optional_backend_state,
         "projection_snapshot_present": values.projection_snapshot_present,
         "retrieval_budget_bytes": values.retrieval_budget_bytes,
         "selected_bytes": max(0, values.selected_bytes),
         "spool_depth": max(0, values.spool_depth),
+        "spool_evidence": "regular_spool_files_and_mtime",
         "stale_lock_count": max(0, values.stale_lock_count),
     }
     return HealthReport(

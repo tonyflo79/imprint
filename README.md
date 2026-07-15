@@ -5,7 +5,8 @@ express while working with Claude Code. It stores the raw **Case**, **Verdict**,
 **Call**, optional **Reason**, and available chosen/rejected alternatives before
 any principle is derived. Later projections never replace that source evidence.
 
-Imprint 3.0.0 is a clean architectural reset. It is not data-compatible by
+Imprint 3.0.1 is the integrity and default-product closure release built on the
+clean 3.0.0 architectural reset. The v3 line is not data-compatible by
 accident: imports are quarantined, migrations are additive, and JSON-LD is the
 portable interchange format.
 
@@ -29,7 +30,7 @@ observation is roadmap-only and is not included or claimed by this release.
 
 ## Requirements
 
-- Python 3.10–3.13 with `venv` and `pip`.
+- Python 3.10 or newer, including Python 3.14, with `venv` and `pip`.
 - Claude Code only if you want automatic hook integration. The CLI and store can
   be used without Claude Code.
 - A local, non-cloud-synchronized data directory. Network drives and shared
@@ -43,7 +44,7 @@ then run the installer inside it. Paths containing spaces are supported.
 macOS or Linux:
 
 ```bash
-sh install/install.sh
+bash install/install.sh
 ```
 
 Windows PowerShell 7:
@@ -54,9 +55,14 @@ Set-ExecutionPolicy -Scope Process Bypass
 ```
 
 Both installers create an isolated virtual environment, write a portable config,
-register each managed hook exactly once, and fail if the installed CLI cannot
-report version `3.0.0`. Re-running the installer is safe and removes duplicate
-managed hooks while preserving unrelated hooks.
+install an owned `imprint` launcher in the user's command path, register each
+managed hook exactly once, and fail if the installed CLI cannot report version
+`3.0.1`. Re-running the installer is safe and removes duplicate managed hooks
+while preserving unrelated hooks. On POSIX, the installer adds one marked PATH
+block to the active shell's login profile (`.zprofile`, `.bash_profile`, or
+`.profile`); uninstall removes that exact owned block and leaves unrelated shell
+configuration untouched. Windows uses the per-user `WindowsApps` directory,
+which is already present in a normal PowerShell user PATH.
 
 Advanced non-interactive options:
 
@@ -64,6 +70,7 @@ Advanced non-interactive options:
 sh install/install.sh \
   --install-root "$HOME/Applications/Imprint App" \
   --data-root "$HOME/Imprint Data" \
+  --launcher-dir "$HOME/.local/bin" \
   --operator primary
 ```
 
@@ -71,6 +78,7 @@ sh install/install.sh \
 & .\install\install.ps1 `
   -InstallRoot "$HOME\Applications\Imprint App" `
   -DataRoot "$HOME\Imprint Data" `
+  -LauncherDir "$env:LOCALAPPDATA\Microsoft\WindowsApps" `
   -Operator primary
 ```
 
@@ -79,7 +87,8 @@ The configuration and environment-variable reference is in
 
 ## Verify the installation
 
-The installed executable is located inside the isolated environment:
+The installer creates a small owned launcher named `imprint` (or `imprint.cmd`)
+and points it at the executable inside the isolated environment:
 
 - macOS/Linux: `~/.local/lib/imprint-local/venv/bin/imprint`
 - Windows: `%LOCALAPPDATA%\ImprintApp\app\venv\Scripts\imprint.exe`
@@ -133,6 +142,14 @@ imprint experimental status
 ```
 
 `capture` queues an immutable event; only the configured compiler writes canon.
+On a compiler-authorized installation, the Stop hook compiles its durable spool
+before returning, so the captured correction is available to the next session
+without a manual command. A non-compiler node remains spool-only. Claude's native
+session identifier is mapped through an installation-local secret to a stable
+opaque Imprint session URN; the native identifier is never written to the spool,
+store, export, or retrieval receipt. Huge transcripts retain the last operator
+feedback and bounded context, plus a content hash, byte counts, truncation flags,
+and a visible degradation receipt rather than ingesting the entire transcript.
 Imported material is quarantined until `keep` or `kill`. Review and deletion are
 explicit operator actions. Run `--help` on any command for its closed arguments.
 `supersede` is directional: the first node is the replacement and the second is
@@ -148,7 +165,7 @@ require a current source-specific `ConsentGrant`.
 macOS or Linux:
 
 ```bash
-sh install/uninstall.sh
+bash install/uninstall.sh
 ```
 
 Windows:
@@ -157,8 +174,10 @@ Windows:
 & .\install\uninstall.ps1
 ```
 
-Uninstall removes the application and only hooks carrying Imprint's ownership
-marker. It preserves the data root and, by default, the config. `--purge-config`
+Uninstall removes the application, only hooks carrying Imprint's ownership
+marker, and only a launcher carrying Imprint's marker and expected installed
+target. A missing, replaced, or modified launcher is left untouched. It preserves
+the data root and, by default, the config. `--purge-config`
 or `-PurgeConfig` removes config too; neither option deletes captured data.
 Canonical deletion requires explicit scope preview and confirmation and is documented in
 [`docs/privacy-and-recovery.md`](docs/privacy-and-recovery.md).
@@ -172,6 +191,13 @@ Canonical deletion requires explicit scope preview and confirmation and is docum
 - Only the configured compiler node mutates canonical state.
 - Retrieval has a deterministic byte budget (32 KiB by default).
 - Failures, rejects, quarantine events, and degraded modes remain visible.
+
+Installed hook bridges bound every child process to 10 seconds. Stop capture is
+fail-closed on invalid input, timeout, a missing executable, corrupt config, or
+child failure because it must not claim uncaptured feedback. Session retrieval,
+domain injection, and content-free health are fail-open: they return empty
+context plus a visible `degraded` receipt so Claude Code can start without
+mistaking the failed read for a successful one.
 
 Read [`docs/architecture.md`](docs/architecture.md),
 [`docs/ontology-contracts.md`](docs/ontology-contracts.md),

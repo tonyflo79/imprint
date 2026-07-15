@@ -46,7 +46,9 @@ def test_known_old_version_reports_catalog_path_without_mutation(tmp_path):
     assert result["status"] == "migration_available"
     assert result["verification"]["migration_path"][0]["migration_id"] == "ontology-3.0.0-to-3.1.0"
     assert result["catalog"][0]["auto_converts_legacy"] is False
-    with store.connect() as conn:
+    with store._migration_connection(
+        store_versions=frozenset({"3.0.0"}), ontology_versions=None,
+    ) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key='ontology_schema_version'").fetchone()[0] == "3.0.0"
 
 

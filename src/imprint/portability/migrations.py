@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from imprint.backup import verify_backup
-from imprint.constants import ONTOLOGY_SCHEMA_VERSION
+from imprint.constants import ONTOLOGY_SCHEMA_VERSION, STORE_SCHEMA_VERSION
 from imprint.errors import ConflictError, ValidationError
 from imprint.ontology.schema import canonical_bytes
 from imprint.store import ImprintStore
@@ -86,7 +86,9 @@ def _read_ontology_version(store: ImprintStore) -> str | None:
     """Read without backfilling meta, so a legacy missing value stays visible."""
     if not store.path.exists():
         store.initialize()
-    with store.connect() as conn:
+    with store._migration_connection(
+        store_versions=frozenset({STORE_SCHEMA_VERSION}), ontology_versions=None,
+    ) as conn:
         table = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
         ).fetchone()
@@ -123,7 +125,9 @@ def _legacy_semantic_records(store: ImprintStore) -> list[dict[str, Any]]:
     """Classify opaque legacy records without interpreting or rewriting them."""
     if not store.path.exists():
         return []
-    with store.connect() as conn:
+    with store._migration_connection(
+        store_versions=frozenset({STORE_SCHEMA_VERSION}), ontology_versions=None,
+    ) as conn:
         tables = {
             str(row[0]) for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -207,6 +211,9 @@ class MigrationRunner:
     def __init__(self, store: ImprintStore):
         self.store = store
         self.store.initialize()
+        # Targets applied by this explicit runner remain inspectable only within
+        # this migration session. Ordinary store connections stay version-pinned.
+        self._session_store_versions = {STORE_SCHEMA_VERSION}
 
     def apply(self, migration: Migration) -> str:
         if not migration.migration_id.strip() or not migration.statements:
@@ -217,12 +224,19 @@ class MigrationRunner:
         )
         if any(not additive.match(statement.lstrip()) for statement in migration.statements):
             raise ValidationError("migration contains a non-additive statement")
-        with self.store.connect() as conn:
+        with self.store._migration_connection(
+            store_versions=frozenset({
+                *self._session_store_versions, migration.from_version, migration.to_version,
+            }),
+        ) as conn:
             conn.execute("BEGIN IMMEDIATE")
             prior = conn.execute("SELECT * FROM migrations WHERE migration_id=?", (migration.migration_id,)).fetchone()
             if prior:
                 if prior["code_sha256"] != migration.code_sha256:
                     raise ConflictError("migration ID was reused with different code")
+                self._session_store_versions.add(str(conn.execute(
+                    "SELECT value FROM meta WHERE key='store_schema_version'"
+                ).fetchone()[0]))
                 return "already-applied"
             current = conn.execute("SELECT value FROM meta WHERE key='store_schema_version'").fetchone()[0]
             if current != migration.from_version:
@@ -251,6 +265,7 @@ class MigrationRunner:
                 (migration.migration_id, migration.from_version, migration.to_version,
                  migration.code_sha256, utc_now(), canonical_receipt, result_hash),
             )
+        self._session_store_versions.add(migration.to_version)
         return "applied"
 
 

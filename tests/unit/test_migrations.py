@@ -28,7 +28,7 @@ def test_migration_is_additive_atomic_and_idempotent(tmp_path):
     item = migration(backup_receipt=backup["path"])
     assert runner.apply(item) == "applied"
     assert runner.apply(item) == "already-applied"
-    with store.connect() as conn:
+    with store._migration_connection(store_versions=frozenset({"3.0.1"})) as conn:
         assert conn.execute("SELECT value FROM meta WHERE key='store_schema_version'").fetchone()[0] == "3.0.1"
         assert conn.execute("SELECT COUNT(*) FROM migrations").fetchone()[0] == 1
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='labels'").fetchone()[0] == "labels"

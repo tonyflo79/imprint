@@ -164,7 +164,4 @@ def test_jsonld_reference_attack_fails_before_store_creation(
     target = ImprintStore(tmp_path / f"target-{foreign}.db")
     with pytest.raises(ValidationError, match="missing canonical node|another operator"):
         import_jsonld(target, attacked)
-    with target.connect() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'"
-        ).fetchone()[0] == 0
+    assert not target.path.exists()

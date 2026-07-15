@@ -36,15 +36,8 @@ def test_hook_capture_compile_retrieve_and_once_delivery(tmp_path):
     assert captured.returncode == 0, captured.stderr
     receipt = json.loads(captured.stdout)
     assert receipt["status"] == "queued"
-    assert set(receipt) == {"event_id", "hook_schema_version", "spool_file", "status"}
-
-    env = dict(os.environ, IMPRINT_CONFIG=str(config))
-    compiled = subprocess.run(
-        [sys.executable, "-m", "imprint.cli", "compile", "--once"],
-        text=True, capture_output=True, cwd=repo, env=env, check=False,
-    )
-    assert compiled.returncode == 0, compiled.stdout + compiled.stderr
-    assert json.loads(compiled.stdout)["captured"] == 1
+    assert receipt["canonical_status"] == "compiled"
+    assert receipt["compile"] == {"captured": 1, "duplicate": 0, "quarantined": 0}
 
     store = ImprintStore(data / "test-operator" / "imprint.db")
     evidence_id = store.current_nodes(["Evidence"])[0]["node_id"]
@@ -124,13 +117,10 @@ def test_native_claude_stop_payload_mines_bounded_transcript(tmp_path):
         "stop_hook_active": False,
     })
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["status"] == "queued"
-    env = dict(os.environ, IMPRINT_CONFIG=str(config))
-    compiled = subprocess.run(
-        [sys.executable, "-m", "imprint.cli", "compile", "--once"],
-        text=True, capture_output=True, cwd=repo, env=env, check=False,
-    )
-    assert compiled.returncode == 0, compiled.stdout + compiled.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["status"] == "queued"
+    assert receipt["canonical_status"] == "compiled"
+    assert receipt["compile"]["captured"] == 1
     store = ImprintStore(data / "test" / "imprint.db")
     verdict = store.current_nodes(["Verdict"])[0]
     assert verdict["payload"]["raw_operator_text"].startswith("No, explicitly report")
