@@ -28,6 +28,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Gitleaks evaluates a commit range that includes the PR head's
+          # parent. The default shallow checkout omits that parent for
+          # fork-origin PRs, causing a false infrastructure failure.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
