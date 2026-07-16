@@ -283,46 +283,52 @@ class ImprintStore:
         event_id = envelope["input_event_id"]
         event_hash = payload_sha256(envelope)
         now = utc_now()
-        with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            prior = conn.execute(
-                "SELECT payload_sha256 FROM consumed_inputs WHERE input_event_id=?", (event_id,)
-            ).fetchone()
-            if prior:
-                if prior[0] == event_hash:
-                    return "duplicate"
-                raise ConflictError("same input_event_id has different bytes")
-            conn.execute(
-                "INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?)",
-                (event_id, "captured", envelope["operator_id"], now, envelope["captured_at"],
-                 canonical_bytes(envelope).decode(), event_hash, None, "captured"),
-            )
-            case = envelope["case"]
-            verdict = envelope["verdict"]
-            call = verdict["call"]
-            self._insert_node(conn, case["case_id"], "Case", case, envelope, event_id, now)
-            self._insert_node(conn, verdict["verdict_id"], "Verdict", verdict, envelope, event_id, now)
-            self._insert_node(conn, call["call_id"], "Call", call, envelope, event_id, now)
-            self._insert_edge(conn, "verdict_about_case", verdict["verdict_id"], case["case_id"], envelope, event_id, now)
-            self._insert_edge(conn, "made_call", verdict["verdict_id"], call["call_id"], envelope, event_id, now)
-            for evidence in envelope["evidence"]:
-                self._insert_node(conn, evidence["evidence_id"], "Evidence", evidence, envelope, event_id, now)
-                self._insert_edge(conn, "supported_by", verdict["verdict_id"], evidence["evidence_id"], envelope, event_id, now)
+        try:
+            with self.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                prior = conn.execute(
+                    "SELECT payload_sha256 FROM consumed_inputs WHERE input_event_id=?", (event_id,)
+                ).fetchone()
+                if prior:
+                    if prior[0] == event_hash:
+                        return "duplicate"
+                    raise ConflictError("same input_event_id has different bytes")
                 conn.execute(
-                    "INSERT INTO source_receipts VALUES(?,?,?,?,?)",
-                    (evidence["evidence_id"], evidence.get("kind", "operator_verbatim"),
-                     evidence.get("source_locator", ""), evidence["content_sha256"], event_id),
+                    "INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?)",
+                    (event_id, "captured", envelope["operator_id"], now, envelope["captured_at"],
+                     canonical_bytes(envelope).decode(), event_hash, None, "captured"),
                 )
-            alternatives = {item["alternative_id"]: item for item in envelope.get("alternatives", [])}
-            for alt_id, alternative in alternatives.items():
-                self._insert_node(conn, alt_id, "Alternative", alternative, envelope, event_id, now)
-            for alt_id in verdict.get("chosen_alternative_ids", []):
-                self._insert_edge(conn, "chose_alternative", verdict["verdict_id"], alt_id, envelope, event_id, now)
-            for alt_id in verdict.get("rejected_alternative_ids", []):
-                self._insert_edge(conn, "rejected_alternative", verdict["verdict_id"], alt_id, envelope, event_id, now)
-            conn.execute(
-                "INSERT INTO consumed_inputs VALUES(?,?,?,?)", (event_id, event_hash, now, source_path)
-            )
+                case = envelope["case"]
+                verdict = envelope["verdict"]
+                call = verdict["call"]
+                self._insert_node(conn, case["case_id"], "Case", case, envelope, event_id, now)
+                self._insert_node(conn, verdict["verdict_id"], "Verdict", verdict, envelope, event_id, now)
+                self._insert_node(conn, call["call_id"], "Call", call, envelope, event_id, now)
+                self._insert_edge(conn, "verdict_about_case", verdict["verdict_id"], case["case_id"], envelope, event_id, now)
+                self._insert_edge(conn, "made_call", verdict["verdict_id"], call["call_id"], envelope, event_id, now)
+                for evidence in envelope["evidence"]:
+                    self._insert_node(conn, evidence["evidence_id"], "Evidence", evidence, envelope, event_id, now)
+                    self._insert_edge(conn, "supported_by", verdict["verdict_id"], evidence["evidence_id"], envelope, event_id, now)
+                    conn.execute(
+                        "INSERT INTO source_receipts VALUES(?,?,?,?,?)",
+                        (evidence["evidence_id"], evidence.get("kind", "operator_verbatim"),
+                         evidence.get("source_locator", ""), evidence["content_sha256"], event_id),
+                    )
+                alternatives = {item["alternative_id"]: item for item in envelope.get("alternatives", [])}
+                for alt_id, alternative in alternatives.items():
+                    self._insert_node(conn, alt_id, "Alternative", alternative, envelope, event_id, now)
+                for alt_id in verdict.get("chosen_alternative_ids", []):
+                    self._insert_edge(conn, "chose_alternative", verdict["verdict_id"], alt_id, envelope, event_id, now)
+                for alt_id in verdict.get("rejected_alternative_ids", []):
+                    self._insert_edge(conn, "rejected_alternative", verdict["verdict_id"], alt_id, envelope, event_id, now)
+                conn.execute(
+                    "INSERT INTO consumed_inputs VALUES(?,?,?,?)", (event_id, event_hash, now, source_path)
+                )
+        except sqlite3.IntegrityError as exc:
+            # A constraint violation is content that was read and rejected, not
+            # infrastructure failure. Raising a domain conflict lets callers quarantine
+            # this one input instead of halting. connect() has already rolled back.
+            raise ConflictError("capture conflicts with committed store state") from exc
         return "captured"
 
     def _insert_node(self, conn, node_id, node_type, payload, envelope, event_id, now):
