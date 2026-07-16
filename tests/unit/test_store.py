@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -708,3 +710,105 @@ def test_canonical_capture_with_alternatives_compiles_end_to_end(tmp_path):
         "chose_alternative",
         "rejected_alternative",
     }
+
+
+def _plant_wal_residue(tmp_path, target_db, marker="committed_before_kill"):
+    """Plant crash residue at target_db: a committed row that lives only in the WAL
+    sidecar, with no live connection -- exactly the state a SIGKILL mid-hook leaves.
+
+    Fully in-process and cross-platform: it snapshots the on-disk db+wal+shm bytes
+    after a commit but before any checkpoint (autocheckpoint disabled, no close),
+    then writes them over the target, reproducing an orphaned WAL byte-for-byte.
+    """
+    base = Path(tmp_path) / "_residue_base.db"
+    ImprintStore(base).initialize()
+    conn = sqlite3.connect(str(base))
+    try:
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("INSERT INTO meta(key,value) VALUES('recover_probe',?)", (marker,))
+        conn.commit()
+        snapshot = {
+            suffix: Path(str(base) + suffix).read_bytes()
+            for suffix in ("", "-wal", "-shm")
+            if Path(str(base) + suffix).exists()
+        }
+    finally:
+        conn.close()
+    for suffix, data in snapshot.items():
+        Path(str(target_db) + suffix).write_bytes(data)
+
+
+def test_recover_replays_committed_wal_residue_without_data_loss(tmp_path):
+    target = tmp_path / "imprint.db"
+    _plant_wal_residue(tmp_path, target)
+    store = ImprintStore(target)
+
+    # The committed marker is not yet in the main database file; it lives in the WAL.
+    read_only = sqlite3.connect(
+        f"{target.resolve().as_uri()}?mode=ro&immutable=1", uri=True
+    )
+    try:
+        assert read_only.execute(
+            "SELECT value FROM meta WHERE key='recover_probe'"
+        ).fetchone() is None
+    finally:
+        read_only.close()
+
+    # The store still bricks on the sidecars -- recovery is deliberate, not automatic.
+    with pytest.raises(ValidationError, match="WAL/SHM"):
+        with store.connect() as conn:
+            conn.execute("SELECT 1")
+
+    result = store.recover()
+    assert result["status"] == "recovered"
+    assert not Path(str(target) + "-wal").exists()
+    assert not Path(str(target) + "-shm").exists()
+
+    # The committed capture survived: it was replayed into the main database.
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='recover_probe'"
+        ).fetchone()
+    assert row[0] == "committed_before_kill"
+    assert store.integrity_check() == "ok"
+
+
+def test_recover_refuses_when_a_live_writer_holds_the_store(tmp_path):
+    target = tmp_path / "imprint.db"
+    store = ImprintStore(target)
+    store.initialize()
+
+    live = sqlite3.connect(str(target))
+    try:
+        live.execute("INSERT INTO meta(key,value) VALUES('live_probe','1')")
+        live.commit()
+        # Hold an open read snapshot so the WAL cannot be reset by another connection.
+        live.execute("BEGIN")
+        live.execute("SELECT * FROM meta").fetchall()
+        assert Path(str(target) + "-wal").exists()
+        with pytest.raises(ValidationError, match="live writer"):
+            store.recover()
+    finally:
+        live.close()
+
+
+def test_recover_on_a_clean_store_reports_clean(tmp_path):
+    target = tmp_path / "imprint.db"
+    store = ImprintStore(target)
+    store.initialize()
+    assert not Path(str(target) + "-wal").exists()
+
+    result = store.recover()
+    assert result["status"] == "clean"
+
+    # The store still opens normally after a no-op recovery.
+    with store.connect() as conn:
+        assert conn.execute(
+            "SELECT value FROM meta WHERE key='store_schema_version'"
+        ).fetchone() is not None
+
+
+def test_recover_requires_an_initialized_store(tmp_path):
+    store = ImprintStore(tmp_path / "missing.db")
+    with pytest.raises(ValidationError, match="initialized before recovery"):
+        store.recover()

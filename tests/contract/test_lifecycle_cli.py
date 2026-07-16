@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from pathlib import Path
 
 from imprint.cli import main
 from imprint.constants import ONTOLOGY_SCHEMA_VERSION
@@ -223,3 +225,41 @@ def test_dedicated_consent_observation_and_outcome_cli_commands(
         "--valid-from", "2026-07-14T12:00:00Z",
     ]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "outcome_added"
+
+
+def _plant_wal_residue(tmp_path, target_db, marker="committed_before_kill"):
+    """Plant crash residue at target_db: a committed row that lives only in the WAL
+    sidecar, with no live connection -- the state a SIGKILL mid-hook leaves behind."""
+    base = Path(tmp_path) / "_residue_base.db"
+    ImprintStore(base).initialize()
+    conn = sqlite3.connect(str(base))
+    try:
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("INSERT INTO meta(key,value) VALUES('recover_probe',?)", (marker,))
+        conn.commit()
+        snapshot = {
+            suffix: Path(str(base) + suffix).read_bytes()
+            for suffix in ("", "-wal", "-shm")
+            if Path(str(base) + suffix).exists()
+        }
+    finally:
+        conn.close()
+    for suffix, data in snapshot.items():
+        Path(str(target_db) + suffix).write_bytes(data)
+
+
+def test_store_recover_cli_replays_wal_residue(tmp_path, capsys):
+    config, root, _store = _configured(tmp_path)
+    target = root / "imprint.db"
+    _plant_wal_residue(tmp_path, target)
+
+    assert main(["--config", str(config), "store", "recover"]) == 0
+    recovered = json.loads(capsys.readouterr().out)
+    assert recovered["status"] == "recovered"
+    assert not (root / "imprint.db-wal").exists()
+
+    with ImprintStore(target).connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='recover_probe'"
+        ).fetchone()
+    assert row[0] == "committed_before_kill"
