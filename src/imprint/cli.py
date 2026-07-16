@@ -51,6 +51,11 @@ def _emit_retrieval_json(value: dict, *, root: Path, session_id: str,
         )
 
 
+# SessionStart re-fires with these sources after the context window was wiped;
+# the memory payload must be refreshed rather than suppressed by the latch.
+_REFRESHING_SESSION_SOURCES = frozenset({"resume", "compact"})
+
+
 def _validate_hook_event(event: dict, expected: str) -> None:
     schema = event.get("hook_schema_version")
     if schema is not None and schema != "1.0.0":
@@ -850,7 +855,15 @@ def main(argv: list[str] | None = None) -> int:
                 _validate_hook_event(event, "SessionStart")
                 from .retrieve import retrieve_payload
                 store.initialize()
-                result = retrieve_payload(store, root=root, session_id=session, prompt="", budget=int(config["context_budget_bytes"]))
+                # SessionStart re-fires on resume/compact — precisely when the
+                # context window was wiped and the memory is most needed. Read
+                # event.source and refresh (bypass the once-delivery latch) so
+                # the payload is redelivered instead of returning already_delivered.
+                refresh = str(event.get("source") or "") in _REFRESHING_SESSION_SOURCES
+                result = retrieve_payload(
+                    store, root=root, session_id=session, prompt="",
+                    budget=int(config["context_budget_bytes"]), refresh=refresh,
+                )
                 response = {
                     "hook_schema_version": "1.0.0",
                     "status": result["status"],
@@ -859,7 +872,7 @@ def main(argv: list[str] | None = None) -> int:
                         "additionalContext": result.get("payload", ""),
                     },
                 }
-                if result.get("status") == "delivered":
+                if not refresh and result.get("status") == "delivered":
                     _emit_retrieval_json(
                         response, root=root, session_id=session,
                         snapshot_id=str(result["snapshot_id"]), domain_id=None,
