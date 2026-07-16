@@ -219,6 +219,59 @@ def test_malformed_spool_creates_content_free_quarantine_receipt(tmp_path):
     assert json.loads(receipt_text)["content_included"] is False
 
 
+def _second_capture(capture_envelope, *, captured_at, description, text, reason):
+    return build_capture_envelope(
+        operator_id=capture_envelope["operator_id"],
+        session_id=new_urn("session"),
+        node_id=capture_envelope["node_id"],
+        case_description=description,
+        raw_operator_text=text,
+        call_type="correct",
+        capture_mechanism="explicit_cli",
+        captured_by="imprint-test",
+        reason=reason,
+        captured_at=captured_at,
+    )
+
+
+def test_conflicting_case_id_quarantines_one_input_without_halting_compile(tmp_path, capture_envelope):
+    root = tmp_path / "operator"
+    conflicting = _second_capture(
+        capture_envelope,
+        captured_at="2026-07-14T18:00:01Z",
+        description="A distinct case that reuses an already committed case_id",
+        text="Name the source that failed because a silent gap changes the conclusion.",
+        reason="A silent gap changes the conclusion.",
+    )
+    conflicting["case"]["case_id"] = capture_envelope["case"]["case_id"]
+    later = _second_capture(
+        capture_envelope,
+        captured_at="2026-07-14T18:00:02Z",
+        description="An unrelated case spooled behind the conflicting one",
+        text="State the confidence interval because a point estimate overstates certainty.",
+        reason="A point estimate overstates certainty.",
+    )
+    for envelope in (capture_envelope, conflicting, later):
+        write_envelope(root, envelope)
+    assert len({e["input_event_id"] for e in (capture_envelope, conflicting, later)}) == 3
+
+    store = ImprintStore(root / "imprint.db")
+    counts = compile_spools(root, store, compiler_authorized=True)
+    assert counts == {"captured": 2, "duplicate": 0, "quarantined": 1}
+
+    receipts = [json.loads(path.read_text()) for path in (root / "quarantine").glob("*.json")]
+    assert len(receipts) == 1
+    assert receipts[0]["error_type"] == "ConflictError"
+    assert receipts[0]["content_included"] is False
+
+    node_ids = {node["node_id"] for node in store.current_nodes()}
+    assert later["case"]["case_id"] in node_ids
+    # The rejected envelope must leave nothing behind: its own verdict and call
+    # ids are unique to it, so their absence proves the write was rolled back.
+    assert conflicting["verdict"]["verdict_id"] not in node_ids
+    assert conflicting["verdict"]["call"]["call_id"] not in node_ids
+
+
 def test_unknown_top_level_and_authority_escalation_fail(capture_envelope):
     capture_envelope["surprise"] = True
     with pytest.raises(ValidationError):
