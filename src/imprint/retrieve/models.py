@@ -38,6 +38,10 @@ class RetrievalRecord:
     authority_tier: str
     evidence_ids: tuple[str, ...]
     case_ids: tuple[str, ...] = ()
+    # Human-readable summary of each linked Case, index-aligned to ``case_ids``.
+    # Carries the judgment's referent to the render boundary so a captured
+    # judgment does not surface as a deictic fragment anchored only to a URN.
+    case_summaries: tuple[str, ...] = ()
     source_receipt_ids: tuple[str, ...] = ()
     domain_id: str | None = None
     pinned: bool = False
