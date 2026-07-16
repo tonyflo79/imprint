@@ -188,9 +188,11 @@ def main() -> int:
     assert queued_receipt["compile"]["captured"] == 1
 
     # Execute every installed bridge and verify its invalid-input failure policy.
+    # Invalid input is never healed by retrying, so every bridge fails open on it;
+    # stop_capture reserves exit 2 for definite capture failures (exercised below).
     install_root = executable.parents[2]
     policies = {
-        "stop_capture.py": (2, "fail_closed"),
+        "stop_capture.py": (0, "fail_open"),
         "session_start.py": (0, "fail_open"),
         "user_prompt_submit.py": (0, "fail_open"),
         "health_check.py": (0, "fail_open"),
@@ -202,6 +204,24 @@ def main() -> int:
         )
         assert bridged.returncode == expected_code, bridged.stdout + bridged.stderr
         assert json.loads(bridged.stdout)["failure_policy"] == expected_policy
+
+    # The definite-capture-failure class still fails closed: a valid Stop payload
+    # whose capture CLI genuinely fails must block once with exit 2.
+    broken_config = args.data_root / "native-hook-config-broken.json"
+    broken_config.write_text("not-json")
+    blocked = subprocess.run(
+        [sys.executable, str(install_root / "hooks" / "stop_capture.py")],
+        input=json.dumps({
+            "hook_event_name": "Stop", "session_id": "artifact-native",
+            "transcript_path": str(transcript), "cwd": str(args.data_root),
+            "stop_hook_active": False,
+        }), text=True, capture_output=True,
+        env=dict(env, IMPRINT_CONFIG=str(broken_config)), check=False,
+    )
+    assert blocked.returncode == 2, blocked.stdout + blocked.stderr
+    blocked_body = json.loads(blocked.stdout)
+    assert blocked_body["error"] == "hook_action_failed"
+    assert blocked_body["failure_policy"] == "fail_closed"
 
     # Purge is its own acceptance boundary: exact confirmation and no active residue.
     preview = preview_purge(store, operator_root, operator)

@@ -15,13 +15,27 @@ _EVENT_NAMES = {
 }
 
 
-def _failure(action: str, error: str) -> int:
-    """Stop fails closed; read-only context and health hooks fail open visibly."""
+def _failure(action: str, error: str, *, stop_hook_active: bool = False) -> int:
+    """Stop fails closed only on a definite capture failure; everything else
+    fails open visibly.
+
+    Exit 2 blocks the host's stop, so it is reserved for the one error a
+    blocked stop can actually heal: the capture subprocess reported failure.
+    Invalid input, a missing or hung executable, and malformed output are not
+    healed by retrying -- exiting 2 on those wedges the host in a stop loop
+    whenever the install is degraded. A block also never repeats once
+    stop_hook_active says a previous block already happened.
+    """
+    blocking = (
+        action == "stop-capture"
+        and error == "hook_action_failed"
+        and not stop_hook_active
+    )
     body = {
         "hook_schema_version": "1.0.0",
         "status": "degraded",
         "error": error,
-        "failure_policy": "fail_closed" if action == "stop-capture" else "fail_open",
+        "failure_policy": "fail_closed" if blocking else "fail_open",
     }
     if action != "stop-capture":
         body["hookSpecificOutput"] = {
@@ -29,7 +43,15 @@ def _failure(action: str, error: str) -> int:
             "additionalContext": "",
         }
     print(json.dumps(body, sort_keys=True))
-    return 2 if action == "stop-capture" else 0
+    if blocking:
+        # On exit 2 the host feeds stderr back to the model; stdout is ignored.
+        print(
+            "imprint: judgment capture failed (hook_action_failed); "
+            "blocking this stop once so the capture is not silently lost.",
+            file=sys.stderr,
+        )
+        return 2
+    return 0
 
 
 def run(action: str) -> int:
@@ -37,6 +59,7 @@ def run(action: str) -> int:
         event = json.load(sys.stdin)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return _failure(action, "hook_input_invalid")
+    stop_hook_active = isinstance(event, dict) and bool(event.get("stop_hook_active"))
     try:
         process = subprocess.run(
             [sys.executable, "-m", "imprint.cli", "hook", action],
@@ -48,16 +71,16 @@ def run(action: str) -> int:
             env=dict(os.environ, IMPRINT_DEFER_DELIVERY_COMMIT="1"),
         )
     except subprocess.TimeoutExpired:
-        return _failure(action, "hook_action_timeout")
+        return _failure(action, "hook_action_timeout", stop_hook_active=stop_hook_active)
     except OSError:
-        return _failure(action, "hook_executable_unavailable")
+        return _failure(action, "hook_executable_unavailable", stop_hook_active=stop_hook_active)
     if process.returncode:
-        return _failure(action, "hook_action_failed")
+        return _failure(action, "hook_action_failed", stop_hook_active=stop_hook_active)
     if process.stdout:
         try:
             body = json.loads(process.stdout)
         except json.JSONDecodeError:
-            return _failure(action, "hook_output_invalid")
+            return _failure(action, "hook_output_invalid", stop_hook_active=stop_hook_active)
         delivery = body.pop("_imprint_delivery", None) if isinstance(body, dict) else None
         sys.stdout.write(json.dumps(body, sort_keys=True) + "\n")
         sys.stdout.flush()

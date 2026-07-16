@@ -234,7 +234,7 @@ def _bridge_module():
 
 
 @pytest.mark.parametrize("script,expected", [
-    ("stop_capture.py", 2),
+    ("stop_capture.py", 0),
     ("session_start.py", 0),
     ("user_prompt_submit.py", 0),
     ("health_check.py", 0),
@@ -250,7 +250,7 @@ def test_every_installed_hook_bridge_has_documented_invalid_input_policy(script,
 
 
 @pytest.mark.parametrize("action,expected", [
-    ("stop-capture", 2), ("session-start", 0),
+    ("stop-capture", 0), ("session-start", 0),
     ("user-prompt-submit", 0), ("health-check", 0),
 ])
 def test_hook_child_hang_is_killed_at_bound_with_declared_policy(tmp_path, monkeypatch, capsys, action, expected):
@@ -270,7 +270,7 @@ def test_hook_child_hang_is_killed_at_bound_with_declared_policy(tmp_path, monke
 
 
 @pytest.mark.parametrize("action,expected", [
-    ("stop-capture", 2), ("session-start", 0),
+    ("stop-capture", 0), ("session-start", 0),
     ("user-prompt-submit", 0), ("health-check", 0),
 ])
 def test_missing_hook_executable_uses_declared_policy(monkeypatch, capsys, action, expected):
