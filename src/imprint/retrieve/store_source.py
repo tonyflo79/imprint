@@ -111,6 +111,12 @@ class StoreRetrievalSource:
         with self.store.connect() as conn:
             source_receipts = {row[0] for row in conn.execute("SELECT source_id FROM source_receipts")}
         case_nodes = {item["node_id"] for item in nodes if item["node_type"] == "Case"}
+        case_summary_by_id = {
+            item["node_id"]: item["payload"]["description"]
+            for item in nodes
+            if item["node_type"] == "Case"
+            and isinstance(item["payload"].get("description"), str)
+        }
         cases_by_source: dict[str, set[str]] = defaultdict(set)
         evidence_by_source: dict[str, set[str]] = defaultdict(set)
         for edge in edges:
@@ -152,6 +158,12 @@ class StoreRetrievalSource:
                 authority_tier=authority,
                 evidence_ids=evidence,
                 case_ids=cases,
+                case_summaries=tuple(
+                    # "" for a Case without a usable description keeps the
+                    # tuple index-aligned with case_ids, as the model promises.
+                    case_summary_by_id.get(case_id, "")
+                    for case_id in cases
+                ),
                 source_receipt_ids=tuple(item for item in evidence if item in source_receipts),
                 domain_id=domain_id,
                 pinned=bool(payload.get("pinned", False)),

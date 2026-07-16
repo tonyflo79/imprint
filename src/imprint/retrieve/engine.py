@@ -133,6 +133,7 @@ def _render(record: RetrievalRecord) -> bytes:
     value = {
         "authority": authority,
         "case_ids": list(record.case_ids),
+        "case_summaries": list(record.case_summaries),
         "evidence_ids": list(record.evidence_ids),
         "ontology": {
             "confidence": record.confidence,
