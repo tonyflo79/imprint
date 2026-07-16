@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS node_versions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_current_node_version
   ON node_versions(node_id) WHERE system_to IS NULL;
+CREATE INDEX IF NOT EXISTS node_versions_by_node
+  ON node_versions(node_id);
 CREATE TABLE IF NOT EXISTS edges (
   edge_id TEXT PRIMARY KEY,
   edge_type TEXT NOT NULL,
@@ -52,6 +54,10 @@ CREATE TABLE IF NOT EXISTS edges (
   operator_id TEXT NOT NULL,
   created_event_id TEXT NOT NULL REFERENCES events(event_id)
 );
+CREATE INDEX IF NOT EXISTS edges_by_source
+  ON edges(source_id);
+CREATE INDEX IF NOT EXISTS edges_by_target
+  ON edges(target_id);
 CREATE TABLE IF NOT EXISTS edge_versions (
   version_id TEXT PRIMARY KEY,
   edge_id TEXT NOT NULL REFERENCES edges(edge_id),
@@ -70,6 +76,8 @@ CREATE TABLE IF NOT EXISTS edge_versions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_current_edge_version
   ON edge_versions(edge_id) WHERE system_to IS NULL;
+CREATE INDEX IF NOT EXISTS edge_versions_by_edge
+  ON edge_versions(edge_id);
 CREATE TABLE IF NOT EXISTS source_receipts (
   source_id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,
