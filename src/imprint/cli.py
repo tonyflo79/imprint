@@ -448,6 +448,13 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve.add_argument("--domain")
     retrieve.add_argument("--refresh", action="store_true")
 
+    store_cmd = subs.add_parser("store", help="inspect or recover the local canonical store")
+    store_subs = store_cmd.add_subparsers(dest="store_action", required=True)
+    store_subs.add_parser(
+        "recover",
+        help="replay orphaned WAL crash residue from a hard kill without losing committed captures",
+    )
+
     hook = subs.add_parser("hook", help="execute one portable hook action")
     hook.add_argument("action", choices=("session-start", "user-prompt-submit", "stop-capture", "health-check"))
 
@@ -841,6 +848,10 @@ def main(argv: list[str] | None = None) -> int:
             result = health_report(root, store, config)
             _write_json(result)
             return 0 if result.get("status") == "healthy" else 2
+        if args.command == "store":
+            if args.store_action == "recover":
+                _write_json(store.recover())
+                return 0
         if args.command == "hook":
             event = json.load(sys.stdin)
             if not isinstance(event, dict):
