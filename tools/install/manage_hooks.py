@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = _read(args.settings)
         if args.action != "status":
-            settings = mutate(settings, args.action, args.python.resolve(), args.hooks_dir.resolve())
+            settings = mutate(settings, args.action, args.python, args.hooks_dir.resolve())
             _write(args.settings, settings)
         counts = _counts(settings)
         expected = {event: len(sources) if args.action != "unregister" else 0 for event, sources in EVENTS.items()}
