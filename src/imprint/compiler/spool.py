@@ -20,7 +20,10 @@ from imprint.permissions import secure_directory, secure_file, secure_tree
 from imprint.store import ImprintStore
 
 LOCK_STALE_SECONDS = 300
-LOCK_WAIT_SECONDS = 10
+# Must stay well under the hook bridge's 10s subprocess timeout so a
+# contended Stop hook raises its own SafetyError (with lock state) instead
+# of being killed as an opaque hook_action_timeout.
+LOCK_WAIT_SECONDS = 5
 LOCK_RETRY_INTERVAL_SECONDS = 0.1
 INVALID_LOCK_CONFIRMATION = "RECOVER-INVALID-LOCK"
 
