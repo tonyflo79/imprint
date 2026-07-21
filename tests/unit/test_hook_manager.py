@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shlex
+import sys
 from pathlib import Path
 
 
@@ -26,6 +28,26 @@ def test_registration_is_idempotent_and_preserves_unrelated_hooks(tmp_path):
     assert twice["theme"] == "dark"
     assert sum("other-tool" in json.dumps(item) for item in twice["hooks"]["Stop"]) == 1
     assert hooks._counts(twice) == {"SessionStart": 2, "UserPromptSubmit": 1, "Stop": 1}
+
+
+def test_registration_preserves_symlinked_python_path(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    venv_python = tmp_path / "venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(Path(sys.executable).resolve())
+
+    assert hooks.main([
+        "register",
+        "--settings", str(settings_path),
+        "--python", str(venv_python),
+        "--hooks-dir", str(tmp_path / "hooks"),
+    ]) == 0
+
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+    registered_python = shlex.split(command)[0]
+    assert registered_python == str(venv_python)
+    assert registered_python != str(venv_python.resolve())
 
 
 def test_unregistration_removes_only_owned_entries(tmp_path):
