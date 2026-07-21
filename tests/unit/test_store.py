@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -169,12 +170,37 @@ def test_noncompiler_refuses_mutation(tmp_path, capture_envelope):
         compile_spools(root, ImprintStore(root / "imprint.db"), compiler_authorized=False)
 
 
-def test_second_compiler_refuses_existing_writer_lock(tmp_path, capture_envelope):
+def test_second_compiler_refuses_existing_writer_lock(tmp_path, capture_envelope, monkeypatch):
+    import imprint.compiler.spool as spool_module
+
     root = tmp_path / "operator"
     write_envelope(root, capture_envelope)
     (root / "compiler.lock").mkdir()
+    monkeypatch.setattr(spool_module, "LOCK_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(spool_module, "LOCK_RETRY_INTERVAL_SECONDS", 0.01)
     with pytest.raises(SafetyError, match="second writer"):
         compile_spools(root, ImprintStore(root / "imprint.db"), compiler_authorized=True)
+
+
+def test_compiler_retries_until_contended_lock_is_released(tmp_path, capture_envelope):
+    root = tmp_path / "operator"
+    write_envelope(root, capture_envelope)
+    lock = root / "compiler.lock"
+    lock.mkdir()
+
+    def release_lock():
+        time.sleep(0.3)
+        lock.rmdir()
+
+    releaser = threading.Thread(target=release_lock)
+    releaser.start()
+    try:
+        assert compile_spools(
+            root, ImprintStore(root / "imprint.db"), compiler_authorized=True,
+        )["captured"] == 1
+    finally:
+        releaser.join(timeout=2)
+    assert not releaser.is_alive()
 
 
 def test_compiler_lock_state_and_exact_nonce_stale_recovery(tmp_path, monkeypatch):

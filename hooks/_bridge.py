@@ -1,4 +1,4 @@
-"""Portable Claude Code hook bridge. Contains no operator paths or content logs."""
+"""Portable Claude Code hook bridge with private failure diagnostics."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import json
 import os
 import subprocess
 import sys
+import uuid
+from datetime import datetime, timezone
 
 HOOK_TIMEOUT_SECONDS = 10
 _EVENT_NAMES = {
@@ -13,6 +15,31 @@ _EVENT_NAMES = {
     "user-prompt-submit": "UserPromptSubmit",
     "health-check": "SessionStart",
 }
+
+
+def _persist_failure(action: str, process: subprocess.CompletedProcess[str]) -> None:
+    """Best-effort private diagnostics for a wrapped action failure."""
+    try:
+        from imprint.config import load_config, resolved_operator_root
+        from imprint.permissions import secure_directory, secure_file
+
+        clock = datetime.now(timezone.utc)
+        directory = resolved_operator_root(load_config()) / "logs" / "hook-failures"
+        secure_directory(directory)
+        path = directory / f"{clock.strftime('%Y%m%dT%H%M%S.%fZ')}-{uuid.uuid4().hex}.json"
+        content = json.dumps({
+            "timestamp": clock.isoformat().replace("+00:00", "Z"),
+            "action": action,
+            "exit_code": process.returncode,
+            "stdout": process.stdout,
+            "stderr": process.stderr,
+        }, sort_keys=True, ensure_ascii=False) + "\n"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        secure_file(path)
+    except Exception:
+        pass
 
 
 def _failure(action: str, error: str, *, stop_hook_active: bool = False) -> int:
@@ -75,6 +102,7 @@ def run(action: str) -> int:
     except OSError:
         return _failure(action, "hook_executable_unavailable", stop_hook_active=stop_hook_active)
     if process.returncode:
+        _persist_failure(action, process)
         return _failure(action, "hook_action_failed", stop_hook_active=stop_hook_active)
     if process.stdout:
         try:

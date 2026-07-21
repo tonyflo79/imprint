@@ -7,6 +7,7 @@ import hashlib
 import os
 import tempfile
 import socket
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +20,11 @@ from imprint.permissions import secure_directory, secure_file, secure_tree
 from imprint.store import ImprintStore
 
 LOCK_STALE_SECONDS = 300
+# Must stay well under the hook bridge's 10s subprocess timeout so a
+# contended Stop hook raises its own SafetyError (with lock state) instead
+# of being killed as an opaque hook_action_timeout.
+LOCK_WAIT_SECONDS = 5
+LOCK_RETRY_INTERVAL_SECONDS = 0.1
 INVALID_LOCK_CONFIRMATION = "RECOVER-INVALID-LOCK"
 
 
@@ -46,6 +52,23 @@ def _write_lock_owner(path: Path, owner: dict[str, Any]) -> None:
     finally:
         temporary.unlink(missing_ok=True)
     secure_file(path)
+
+
+def _acquire_compiler_lock(operator_root: Path, lock: Path) -> None:
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    while True:
+        try:
+            lock.mkdir()
+            return
+        except FileExistsError as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                state = compiler_lock_state(operator_root)
+                raise SafetyError(
+                    "compiler lock already held; refusing a second writer; "
+                    f"state={state['state']} nonce={state.get('nonce','unknown')}"
+                ) from exc
+            time.sleep(min(LOCK_RETRY_INTERVAL_SECONDS, remaining))
 
 
 def _local_pid_alive(pid: int) -> bool:
@@ -411,11 +434,7 @@ def compile_spools(operator_root: Path, store: ImprintStore, *, compiler_authori
     lock = operator_root / "compiler.lock"
     secure_directory(operator_root)
     nonce = uuid.uuid4().hex
-    try:
-        lock.mkdir()
-    except FileExistsError as exc:
-        state = compiler_lock_state(operator_root)
-        raise SafetyError(f"compiler lock already held; refusing a second writer; state={state['state']} nonce={state.get('nonce','unknown')}") from exc
+    _acquire_compiler_lock(operator_root, lock)
     secure_directory(lock)
     try:
         owner = {

@@ -24,6 +24,7 @@ import importlib.util
 import io
 import json
 import subprocess
+from datetime import datetime
 
 import pytest
 
@@ -59,6 +60,35 @@ def test_definite_capture_failure_blocks_once_with_reason_on_stderr(monkeypatch,
     body = json.loads(captured.out)
     assert body["error"] == "hook_action_failed"
     assert body["failure_policy"] == "fail_closed"
+
+
+def test_definite_capture_failure_persists_subprocess_output(monkeypatch, capsys, tmp_path):
+    bridge = _bridge_module()
+    config = tmp_path / "config.json"
+    data_root = tmp_path / "data"
+    config.write_text(json.dumps({
+        "data_root": str(data_root), "operator_slug": "test-operator",
+    }))
+    monkeypatch.setenv("IMPRINT_CONFIG", str(config))
+    monkeypatch.setattr(bridge.sys, "stdin", io.StringIO(json.dumps({"stop_hook_active": False})))
+    monkeypatch.setattr(
+        bridge.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0] if args else [], 7, "captured stdout", "captured stderr",
+        ),
+    )
+
+    assert bridge.run("stop-capture") == 2
+    capsys.readouterr()
+    records = list((data_root / "test-operator" / "logs" / "hook-failures").glob("*.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text())
+    assert datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00")).tzinfo is not None
+    assert record["action"] == "stop-capture"
+    assert record["exit_code"] == 7
+    assert record["stdout"] == "captured stdout"
+    assert record["stderr"] == "captured stderr"
 
 
 def test_stop_hook_active_suppresses_reblocking(monkeypatch, capsys):
