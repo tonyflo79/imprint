@@ -26,24 +26,18 @@ def _identity(value: os.stat_result) -> tuple[int, int]:
     return value.st_dev, value.st_ino
 
 
-def _version(value: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (
-        value.st_dev,
-        value.st_ino,
-        value.st_size,
-        value.st_mtime_ns,
-        value.st_ctime_ns,
-    )
+class _TranscriptChangedDuringRead(Exception):
+    pass
 
 
-def _read_native_transcript_snapshot(
+def _read_native_transcript_snapshot_once(
     path_value: str, *, tail_limit: int | None = None,
 ) -> _TranscriptSnapshot:
     """Open once and return a bounded, immutable view of a regular file.
 
-    The path checks, size decision, reads, and final change detection are all
-    bound to the same descriptor.  The path identity is checked before and
-    after the read so a rename-and-replace cannot silently change the source.
+    The path checks, size decision, and reads are bound to the same descriptor.
+    Append-only growth is accepted because reads stop at the snapshot size;
+    rotation or truncation is reported to the bounded retry wrapper.
     """
     path = Path(path_value).expanduser()
     if not path.is_absolute():
@@ -82,23 +76,44 @@ def _read_native_transcript_snapshot(
                 break
             chunks.append(chunk)
             remaining -= len(chunk)
-        extra = os.read(descriptor, 1)
         after = os.fstat(descriptor)
         try:
             path_after = os.stat(path, follow_symlinks=False)
         except OSError as exc:
-            raise ValidationError("transcript_path changed during the bounded read") from exc
+            raise _TranscriptChangedDuringRead from exc
         if (
             remaining
-            or extra
-            or _version(after) != _version(opened)
+            or not stat.S_ISREG(after.st_mode)
+            or _identity(after) != _identity(opened)
+            or after.st_size < size
             or not stat.S_ISREG(path_after.st_mode)
             or _identity(path_after) != _identity(opened)
+            or path_after.st_size < size
         ):
-            raise ValidationError("transcript_path changed during the bounded read")
+            raise _TranscriptChangedDuringRead
         return _TranscriptSnapshot(data=b"".join(chunks), size=size, offset=offset)
     finally:
         os.close(descriptor)
+
+
+def _read_native_transcript_snapshot(
+    path_value: str, *, tail_limit: int | None = None,
+) -> _TranscriptSnapshot:
+    """Return a stable snapshot, retrying one rotation or truncation."""
+
+    changed: Exception | None = None
+    for _ in range(2):
+        try:
+            return _read_native_transcript_snapshot_once(
+                path_value, tail_limit=tail_limit,
+            )
+        except _TranscriptChangedDuringRead as exc:
+            changed = exc
+        except ValidationError as exc:
+            if changed is None:
+                raise
+            changed = exc
+    raise ValidationError("transcript_path changed during the bounded read") from changed
 
 
 def _message_text(value: Any) -> str:
